@@ -128,10 +128,8 @@ pub(crate) enum HookOutcome {
     /// Hook completed; proceed with the operation normally.
     Proceed,
     /// Hook requests blocking the operation (e.g. deny a tool call).
-    #[allow(dead_code)] // Constructed by hook executor (not yet wired up).
     Block { message: Option<String> },
     /// Hook requests modifying the input or output content.
-    #[allow(dead_code)] // Constructed by hook executor (not yet wired up).
     Modify { content: String },
 }
 
