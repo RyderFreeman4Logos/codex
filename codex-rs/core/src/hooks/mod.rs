@@ -1,3 +1,4 @@
+mod executor;
 mod registry;
 mod types;
 mod user_notification;
