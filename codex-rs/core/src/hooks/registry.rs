@@ -37,14 +37,26 @@ impl Hooks {
         }
     }
 
-    pub(crate) async fn dispatch(&self, hook_payload: HookPayload) {
-        // TODO(gt): support interrupting program execution by returning a result here.
+    /// Dispatch hooks for the given event and return the aggregate outcome.
+    ///
+    /// - If any hook returns `Block`, dispatching stops immediately and
+    ///   `Block` is returned.
+    /// - If any hook returns `Modify`, the modified content is carried
+    ///   forward and `Modify` is returned after all hooks run.
+    /// - Otherwise `Proceed` is returned.
+    pub(crate) async fn dispatch(&self, hook_payload: HookPayload) -> HookOutcome {
+        let mut result = HookOutcome::Proceed;
         for hook in self.hooks_for_event(&hook_payload.hook_event) {
             let outcome = hook.execute(&hook_payload).await;
-            if matches!(outcome, HookOutcome::Stop) {
-                break;
+            match &outcome {
+                HookOutcome::Block { .. } => return outcome,
+                HookOutcome::Modify { .. } => {
+                    result = outcome;
+                }
+                HookOutcome::Proceed => {}
             }
         }
+        result
     }
 }
 
@@ -115,6 +127,7 @@ mod tests {
         Hook {
             func: Arc::new(move |_| {
                 let calls = Arc::clone(&calls);
+                let outcome = outcome.clone();
                 Box::pin(async move {
                     calls.fetch_add(1, Ordering::SeqCst);
                     outcome
@@ -170,25 +183,25 @@ mod tests {
     #[tokio::test]
     async fn dispatch_executes_hook() {
         let calls = Arc::new(AtomicUsize::new(0));
-        let hooks = hooks_for_after_agent(vec![counting_hook(&calls, HookOutcome::Continue)]);
+        let hooks = hooks_for_after_agent(vec![counting_hook(&calls, HookOutcome::Proceed)]);
 
         hooks.dispatch(hook_payload("1")).await;
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
-    async fn default_hook_is_noop_and_continues() {
+    async fn default_hook_is_noop_and_proceeds() {
         let payload = hook_payload("d");
         let outcome = Hook::default().execute(&payload).await;
-        assert_eq!(outcome, HookOutcome::Continue);
+        assert_eq!(outcome, HookOutcome::Proceed);
     }
 
     #[tokio::test]
     async fn dispatch_executes_multiple_hooks_for_same_event() {
         let calls = Arc::new(AtomicUsize::new(0));
         let hooks = hooks_for_after_agent(vec![
-            counting_hook(&calls, HookOutcome::Continue),
-            counting_hook(&calls, HookOutcome::Continue),
+            counting_hook(&calls, HookOutcome::Proceed),
+            counting_hook(&calls, HookOutcome::Proceed),
         ]);
 
         hooks.dispatch(hook_payload("2")).await;
@@ -196,11 +209,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_stops_when_hook_returns_stop() {
+    async fn dispatch_stops_when_hook_returns_block() {
         let calls = Arc::new(AtomicUsize::new(0));
         let hooks = hooks_for_after_agent(vec![
-            counting_hook(&calls, HookOutcome::Stop),
-            counting_hook(&calls, HookOutcome::Continue),
+            counting_hook(&calls, HookOutcome::Block { message: None }),
+            counting_hook(&calls, HookOutcome::Proceed),
         ]);
 
         hooks.dispatch(hook_payload("3")).await;
@@ -228,7 +241,7 @@ mod tests {
                     ])
                     .expect("build command");
                     command.status().await.expect("run hook command");
-                    HookOutcome::Continue
+                    HookOutcome::Proceed
                 })
             }),
         };
@@ -286,7 +299,7 @@ mod tests {
                     ])
                     .expect("build command");
                     command.status().await.expect("run hook command");
-                    HookOutcome::Continue
+                    HookOutcome::Proceed
                 })
             }),
         };

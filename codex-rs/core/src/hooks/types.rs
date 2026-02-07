@@ -20,7 +20,7 @@ pub(crate) struct Hook {
 impl Default for Hook {
     fn default() -> Self {
         Self {
-            func: Arc::new(|_| Box::pin(async { HookOutcome::Continue })),
+            func: Arc::new(|_| Box::pin(async { HookOutcome::Proceed })),
         }
     }
 }
@@ -66,11 +66,17 @@ pub(crate) enum HookEvent {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Outcome of a hook execution that determines how the agent should proceed.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum HookOutcome {
-    Continue,
-    #[allow(dead_code)]
-    Stop,
+    /// Hook completed; proceed with the operation normally.
+    Proceed,
+    /// Hook requests blocking the operation (e.g. deny a tool call).
+    #[allow(dead_code)] // Constructed by hook executor (not yet wired up).
+    Block { message: Option<String> },
+    /// Hook requests modifying the input or output content.
+    #[allow(dead_code)] // Constructed by hook executor (not yet wired up).
+    Modify { content: String },
 }
 
 #[cfg(test)]
