@@ -86,9 +86,18 @@ pub(super) fn command_hook(argv: Vec<String>, timeout: Duration) -> Hook {
                     }
                 };
 
-                let mut stdin = child.stdin.take().expect("stdin was piped");
-                let mut stdout = child.stdout.take().expect("stdout was piped");
-                let mut stderr = child.stderr.take().expect("stderr was piped");
+                let Some(mut stdin) = child.stdin.take() else {
+                    tracing::warn!("hook child process has no stdin handle");
+                    return HookOutcome::Proceed;
+                };
+                let Some(mut stdout) = child.stdout.take() else {
+                    tracing::warn!("hook child process has no stdout handle");
+                    return HookOutcome::Proceed;
+                };
+                let Some(mut stderr) = child.stderr.take() else {
+                    tracing::warn!("hook child process has no stderr handle");
+                    return HookOutcome::Proceed;
+                };
 
                 // Serialize and write payload to stdin
                 let payload_json = match serde_json::to_vec(&payload) {
@@ -156,7 +165,7 @@ pub(super) fn command_hook(argv: Vec<String>, timeout: Duration) -> Hook {
                 // Non-zero exit code → block with stderr message
                 if !status.success() {
                     let message = if stderr_string.is_empty() {
-                        format!("hook command failed with exit code {}", status)
+                        format!("hook command failed with exit code {status}")
                     } else {
                         stderr_string
                     };

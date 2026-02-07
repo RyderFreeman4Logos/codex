@@ -10,6 +10,11 @@ use crate::config::Config;
 #[derive(Default, Clone)]
 pub(crate) struct Hooks {
     after_agent: Vec<Hook>,
+    pre_tool_use: Vec<Hook>,
+    post_tool_use: Vec<Hook>,
+    stop: Vec<Hook>,
+    user_prompt_submit: Vec<Hook>,
+    notification: Vec<Hook>,
 }
 
 fn get_notify_hook(config: &Config) -> Option<Hook> {
@@ -28,12 +33,24 @@ impl Hooks {
     // the after_agent hooks.
     pub(crate) fn new(config: &Config) -> Self {
         let after_agent = get_notify_hook(config).into_iter().collect();
-        Self { after_agent }
+        Self {
+            after_agent,
+            pre_tool_use: Vec::new(),
+            post_tool_use: Vec::new(),
+            stop: Vec::new(),
+            user_prompt_submit: Vec::new(),
+            notification: Vec::new(),
+        }
     }
 
     fn hooks_for_event(&self, hook_event: &HookEvent) -> &[Hook] {
         match hook_event {
             HookEvent::AfterAgent { .. } => &self.after_agent,
+            HookEvent::PreToolUse { .. } => &self.pre_tool_use,
+            HookEvent::PostToolUse { .. } => &self.post_tool_use,
+            HookEvent::Stop { .. } => &self.stop,
+            HookEvent::UserPromptSubmit { .. } => &self.user_prompt_submit,
+            HookEvent::Notification { .. } => &self.notification,
         }
     }
 
@@ -137,7 +154,10 @@ mod tests {
     }
 
     fn hooks_for_after_agent(hooks: Vec<Hook>) -> Hooks {
-        Hooks { after_agent: hooks }
+        Hooks {
+            after_agent: hooks,
+            ..Default::default()
+        }
     }
 
     #[test]

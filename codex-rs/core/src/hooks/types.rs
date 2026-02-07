@@ -50,6 +50,39 @@ pub(crate) struct HookEventAfterAgent {
     pub last_assistant_message: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) struct HookEventPreToolUse {
+    pub tool_name: String,
+    pub tool_input: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) struct HookEventPostToolUse {
+    pub tool_name: String,
+    pub tool_output: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) struct HookEventStop {
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) struct HookEventUserPromptSubmit {
+    pub user_message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) struct HookEventNotification {
+    pub message: String,
+    pub level: String,
+}
+
 fn serialize_triggered_at<S>(value: &DateTime<Utc>, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
@@ -63,6 +96,29 @@ pub(crate) enum HookEvent {
     AfterAgent {
         #[serde(flatten)]
         event: HookEventAfterAgent,
+    },
+    PreToolUse {
+        #[serde(flatten)]
+        event: HookEventPreToolUse,
+    },
+    PostToolUse {
+        #[serde(flatten)]
+        event: HookEventPostToolUse,
+    },
+    #[allow(dead_code)] // Integration point in codex.rs agent loop requires separate PR.
+    Stop {
+        #[serde(flatten)]
+        event: HookEventStop,
+    },
+    #[allow(dead_code)] // Integration point requires architectural changes.
+    UserPromptSubmit {
+        #[serde(flatten)]
+        event: HookEventUserPromptSubmit,
+    },
+    #[allow(dead_code)] // Integration point requires architectural changes.
+    Notification {
+        #[serde(flatten)]
+        event: HookEventNotification,
     },
 }
 

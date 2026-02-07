@@ -149,6 +149,29 @@ pub(crate) async fn handle_output_item_done(
 
             output.needs_follow_up = true;
         }
+        // A tool call was blocked by a pre_tool_use hook; surface the block message back into the transcript.
+        Err(FunctionCallError::ToolCallBlocked(message)) => {
+            let response = ResponseInputItem::FunctionCallOutput {
+                call_id: String::new(),
+                output: FunctionCallOutputPayload {
+                    body: FunctionCallOutputBody::Text(message),
+                    ..Default::default()
+                },
+            };
+            ctx.sess
+                .record_conversation_items(&ctx.turn_context, std::slice::from_ref(&item))
+                .await;
+            if let Some(response_item) = response_input_to_response_item(&response) {
+                ctx.sess
+                    .record_conversation_items(
+                        &ctx.turn_context,
+                        std::slice::from_ref(&response_item),
+                    )
+                    .await;
+            }
+
+            output.needs_follow_up = true;
+        }
         // A fatal error occurred; surface it back into history.
         Err(FunctionCallError::Fatal(message)) => {
             return Err(CodexErr::Fatal(message));
