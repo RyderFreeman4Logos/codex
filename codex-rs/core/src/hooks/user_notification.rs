@@ -133,4 +133,75 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn legacy_notify_json_for_pre_tool_use_returns_event_serialized_directly() -> Result<()> {
+        use super::super::types::HookEventPreToolUse;
+
+        let hook_event = HookEvent::PreToolUse {
+            event: HookEventPreToolUse {
+                tool_name: "bash".to_string(),
+                tool_input: r#"{"command": "ls"}"#.to_string(),
+            },
+        };
+
+        let serialized = legacy_notify_json(&hook_event, Path::new("/tmp"))?;
+        let actual: Value = serde_json::from_str(&serialized)?;
+
+        // PreToolUse events use new protocol, not legacy format
+        let expected = json!({
+            "event_type": "pre_tool_use",
+            "tool_name": "bash",
+            "tool_input": r#"{"command": "ls"}"#,
+        });
+
+        assert_eq!(actual, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_notify_json_for_post_tool_use_returns_event_serialized_directly() -> Result<()> {
+        use super::super::types::HookEventPostToolUse;
+
+        let hook_event = HookEvent::PostToolUse {
+            event: HookEventPostToolUse {
+                tool_name: "bash".to_string(),
+                tool_output: "file1.txt\nfile2.txt".to_string(),
+            },
+        };
+
+        let serialized = legacy_notify_json(&hook_event, Path::new("/tmp"))?;
+        let actual: Value = serde_json::from_str(&serialized)?;
+
+        let expected = json!({
+            "event_type": "post_tool_use",
+            "tool_name": "bash",
+            "tool_output": "file1.txt\nfile2.txt",
+        });
+
+        assert_eq!(actual, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_notify_json_for_stop_returns_event_serialized_directly() -> Result<()> {
+        use super::super::types::HookEventStop;
+
+        let hook_event = HookEvent::Stop {
+            event: HookEventStop {
+                reason: "max_tokens".to_string(),
+            },
+        };
+
+        let serialized = legacy_notify_json(&hook_event, Path::new("/tmp"))?;
+        let actual: Value = serde_json::from_str(&serialized)?;
+
+        let expected = json!({
+            "event_type": "stop",
+            "reason": "max_tokens",
+        });
+
+        assert_eq!(actual, expected);
+        Ok(())
+    }
 }

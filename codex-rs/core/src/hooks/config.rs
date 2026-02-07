@@ -199,4 +199,99 @@ mod tests {
         assert!(!matches_tool(&entry, "write"));
         assert!(!matches_tool(&entry, "read_file"));
     }
+
+    #[test]
+    fn test_hooks_config_deserialize_pre_tool_use() {
+        let toml_str = r#"
+            [[pre_tool_use]]
+            command = ["./validate-tool.sh"]
+            timeout = 10
+            matcher = "bash*"
+
+            [[pre_tool_use]]
+            command = ["./log-tool.sh", "--verbose"]
+            matcher = "*"
+        "#;
+        let config: HooksConfigToml = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.pre_tool_use.len(), 2);
+        assert_eq!(config.pre_tool_use[0].command, vec!["./validate-tool.sh"]);
+        assert_eq!(config.pre_tool_use[0].timeout, 10);
+        assert_eq!(config.pre_tool_use[0].matcher, Some("bash*".to_string()));
+        assert_eq!(config.pre_tool_use[1].command, vec!["./log-tool.sh", "--verbose"]);
+        assert_eq!(config.pre_tool_use[1].matcher, Some("*".to_string()));
+    }
+
+    #[test]
+    fn test_hooks_config_full_deserialize() {
+        let toml_str = r#"
+            [[after_agent]]
+            command = ["./notify.sh"]
+
+            [[pre_tool_use]]
+            command = ["./pre-tool.sh"]
+            matcher = "bash"
+
+            [[post_tool_use]]
+            command = ["./post-tool.sh"]
+
+            [[notification]]
+            command = ["./notify-desktop.sh"]
+
+            [[stop]]
+            command = ["./cleanup.sh"]
+
+            [[user_prompt_submit]]
+            command = ["./log-prompt.sh"]
+        "#;
+        let config: HooksConfigToml = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.after_agent.len(), 1);
+        assert_eq!(config.pre_tool_use.len(), 1);
+        assert_eq!(config.post_tool_use.len(), 1);
+        assert_eq!(config.notification.len(), 1);
+        assert_eq!(config.stop.len(), 1);
+        assert_eq!(config.user_prompt_submit.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_hook_from_entry_creates_working_hook() {
+        let entry = HookEntryToml {
+            command: vec!["echo".to_string(), "test".to_string()],
+            timeout: 5,
+            matcher: None,
+        };
+
+        let hook = hook_from_entry(&entry);
+
+        // Create a minimal payload to test hook execution
+        use super::super::types::HookPayload;
+        use super::super::types::HookEvent;
+        use super::super::types::HookEventAfterAgent;
+        use chrono::{TimeZone, Utc};
+        use codex_protocol::ThreadId;
+        use std::path::PathBuf;
+
+        let payload = HookPayload {
+            session_id: ThreadId::new(),
+            cwd: PathBuf::from("/tmp"),
+            triggered_at: Utc
+                .with_ymd_and_hms(2025, 1, 1, 0, 0, 0)
+                .single()
+                .expect("valid timestamp"),
+            hook_event: HookEvent::AfterAgent {
+                event: HookEventAfterAgent {
+                    thread_id: ThreadId::new(),
+                    turn_id: "test".to_string(),
+                    input_messages: vec!["test".to_string()],
+                    last_assistant_message: None,
+                },
+            },
+        };
+
+        // Hook should execute without panicking
+        let outcome = hook.execute(&payload).await;
+
+        // command_hook returns Proceed on success
+        use super::super::types::HookOutcome;
+        assert_eq!(outcome, HookOutcome::Proceed);
+    }
 }

@@ -160,6 +160,58 @@ mod tests {
         }
     }
 
+    fn hooks_for_pre_tool_use(hooks: Vec<Hook>) -> Hooks {
+        Hooks {
+            pre_tool_use: hooks,
+            ..Default::default()
+        }
+    }
+
+    fn hooks_for_post_tool_use(hooks: Vec<Hook>) -> Hooks {
+        Hooks {
+            post_tool_use: hooks,
+            ..Default::default()
+        }
+    }
+
+    fn hook_payload_pre_tool_use(label: &str) -> HookPayload {
+        use super::super::types::HookEventPreToolUse;
+
+        HookPayload {
+            session_id: ThreadId::new(),
+            cwd: PathBuf::from(CWD),
+            triggered_at: Utc
+                .with_ymd_and_hms(2025, 1, 1, 0, 0, 0)
+                .single()
+                .expect("valid timestamp"),
+            hook_event: HookEvent::PreToolUse {
+                event: HookEventPreToolUse {
+                    tool_name: format!("tool-{label}"),
+                    tool_input: r#"{"arg": "value"}"#.to_string(),
+                },
+            },
+        }
+    }
+
+    fn hook_payload_post_tool_use(label: &str) -> HookPayload {
+        use super::super::types::HookEventPostToolUse;
+
+        HookPayload {
+            session_id: ThreadId::new(),
+            cwd: PathBuf::from(CWD),
+            triggered_at: Utc
+                .with_ymd_and_hms(2025, 1, 1, 0, 0, 0)
+                .single()
+                .expect("valid timestamp"),
+            hook_event: HookEvent::PostToolUse {
+                event: HookEventPostToolUse {
+                    tool_name: format!("tool-{label}"),
+                    tool_output: "success".to_string(),
+                },
+            },
+        }
+    }
+
     #[test]
     fn command_from_argv_returns_none_for_empty_args() {
         assert!(command_from_argv(&[]).is_none());
@@ -344,5 +396,96 @@ mod tests {
 
         assert_eq!(contents, expected);
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn dispatch_pre_tool_use_hooks_for_pre_tool_use_event() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let hooks = hooks_for_pre_tool_use(vec![counting_hook(&calls, HookOutcome::Proceed)]);
+
+        hooks.dispatch(hook_payload_pre_tool_use("1")).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn dispatch_post_tool_use_hooks_for_post_tool_use_event() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let hooks = hooks_for_post_tool_use(vec![counting_hook(&calls, HookOutcome::Proceed)]);
+
+        hooks.dispatch(hook_payload_post_tool_use("1")).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn dispatch_does_not_fire_hooks_for_different_event_type() {
+        let calls_after = Arc::new(AtomicUsize::new(0));
+        let calls_pre = Arc::new(AtomicUsize::new(0));
+
+        let hooks = Hooks {
+            after_agent: vec![counting_hook(&calls_after, HookOutcome::Proceed)],
+            pre_tool_use: vec![counting_hook(&calls_pre, HookOutcome::Proceed)],
+            ..Default::default()
+        };
+
+        // Dispatch PreToolUse event should not fire after_agent hooks
+        hooks.dispatch(hook_payload_pre_tool_use("1")).await;
+        assert_eq!(calls_after.load(Ordering::SeqCst), 0);
+        assert_eq!(calls_pre.load(Ordering::SeqCst), 1);
+
+        // Dispatch AfterAgent event should not fire pre_tool_use hooks
+        hooks.dispatch(hook_payload("2")).await;
+        assert_eq!(calls_after.load(Ordering::SeqCst), 1);
+        assert_eq!(calls_pre.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn dispatch_modify_outcome_is_carried_forward() {
+        let hooks = hooks_for_after_agent(vec![
+            Hook {
+                func: Arc::new(|_| {
+                    Box::pin(async { HookOutcome::Modify { content: "first".to_string() } })
+                }),
+            },
+            Hook {
+                func: Arc::new(|_| Box::pin(async { HookOutcome::Proceed })),
+            },
+            Hook {
+                func: Arc::new(|_| {
+                    Box::pin(async { HookOutcome::Modify { content: "second".to_string() } })
+                }),
+            },
+        ]);
+
+        let outcome = hooks.dispatch(hook_payload("1")).await;
+        // Last Modify wins
+        assert_eq!(
+            outcome,
+            HookOutcome::Modify {
+                content: "second".to_string()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_modify_returned_after_all_hooks_run() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let hooks = hooks_for_after_agent(vec![
+            Hook {
+                func: Arc::new(|_| {
+                    Box::pin(async { HookOutcome::Modify { content: "modified".to_string() } })
+                }),
+            },
+            counting_hook(&calls, HookOutcome::Proceed),
+            counting_hook(&calls, HookOutcome::Proceed),
+        ]);
+
+        let outcome = hooks.dispatch(hook_payload("1")).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 2); // Both subsequent hooks ran
+        assert_eq!(
+            outcome,
+            HookOutcome::Modify {
+                content: "modified".to_string()
+            }
+        );
     }
 }

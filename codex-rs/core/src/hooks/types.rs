@@ -186,4 +186,105 @@ mod tests {
 
         assert_eq!(actual, expected);
     }
+
+    #[test]
+    fn hook_event_pre_tool_use_serializes_with_flattened_fields() {
+        use super::HookEventPreToolUse;
+
+        let hook_event = HookEvent::PreToolUse {
+            event: HookEventPreToolUse {
+                tool_name: "bash".to_string(),
+                tool_input: r#"{"command": "ls"}"#.to_string(),
+            },
+        };
+
+        let actual = serde_json::to_value(&hook_event).expect("serialize pre_tool_use event");
+        let expected = json!({
+            "event_type": "pre_tool_use",
+            "tool_name": "bash",
+            "tool_input": r#"{"command": "ls"}"#,
+        });
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn hook_event_post_tool_use_serializes_correctly() {
+        use super::HookEventPostToolUse;
+
+        let hook_event = HookEvent::PostToolUse {
+            event: HookEventPostToolUse {
+                tool_name: "bash".to_string(),
+                tool_output: "file1.txt\nfile2.txt".to_string(),
+            },
+        };
+
+        let actual = serde_json::to_value(&hook_event).expect("serialize post_tool_use event");
+        let expected = json!({
+            "event_type": "post_tool_use",
+            "tool_name": "bash",
+            "tool_output": "file1.txt\nfile2.txt",
+        });
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn hook_event_stop_serializes_correctly() {
+        use super::HookEventStop;
+
+        let hook_event = HookEvent::Stop {
+            event: HookEventStop {
+                reason: "max_tokens_reached".to_string(),
+            },
+        };
+
+        let actual = serde_json::to_value(&hook_event).expect("serialize stop event");
+        let expected = json!({
+            "event_type": "stop",
+            "reason": "max_tokens_reached",
+        });
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn hook_event_user_prompt_submit_serializes_correctly() {
+        use super::HookEventUserPromptSubmit;
+
+        let hook_event = HookEvent::UserPromptSubmit {
+            event: HookEventUserPromptSubmit {
+                user_message: "Help me debug this code".to_string(),
+            },
+        };
+
+        let actual = serde_json::to_value(&hook_event).expect("serialize user_prompt_submit event");
+        let expected = json!({
+            "event_type": "user_prompt_submit",
+            "user_message": "Help me debug this code",
+        });
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn hook_event_notification_serializes_correctly() {
+        use super::HookEventNotification;
+
+        let hook_event = HookEvent::Notification {
+            event: HookEventNotification {
+                message: "Build completed successfully".to_string(),
+                level: "info".to_string(),
+            },
+        };
+
+        let actual = serde_json::to_value(&hook_event).expect("serialize notification event");
+        let expected = json!({
+            "event_type": "notification",
+            "message": "Build completed successfully",
+            "level": "info",
+        });
+
+        assert_eq!(actual, expected);
+    }
 }
