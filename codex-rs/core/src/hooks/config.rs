@@ -217,7 +217,10 @@ mod tests {
         assert_eq!(config.pre_tool_use[0].command, vec!["./validate-tool.sh"]);
         assert_eq!(config.pre_tool_use[0].timeout, 10);
         assert_eq!(config.pre_tool_use[0].matcher, Some("bash*".to_string()));
-        assert_eq!(config.pre_tool_use[1].command, vec!["./log-tool.sh", "--verbose"]);
+        assert_eq!(
+            config.pre_tool_use[1].command,
+            vec!["./log-tool.sh", "--verbose"]
+        );
         assert_eq!(config.pre_tool_use[1].matcher, Some("*".to_string()));
     }
 
@@ -263,10 +266,11 @@ mod tests {
         let hook = hook_from_entry(&entry);
 
         // Create a minimal payload to test hook execution
-        use super::super::types::HookPayload;
         use super::super::types::HookEvent;
         use super::super::types::HookEventAfterAgent;
-        use chrono::{TimeZone, Utc};
+        use super::super::types::HookPayload;
+        use chrono::TimeZone;
+        use chrono::Utc;
         use codex_protocol::ThreadId;
         use std::path::PathBuf;
 

@@ -443,7 +443,11 @@ mod tests {
         let hooks = hooks_for_after_agent(vec![
             Hook {
                 func: Arc::new(|_| {
-                    Box::pin(async { HookOutcome::Modify { content: "first".to_string() } })
+                    Box::pin(async {
+                        HookOutcome::Modify {
+                            content: "first".to_string(),
+                        }
+                    })
                 }),
             },
             Hook {
@@ -451,7 +455,11 @@ mod tests {
             },
             Hook {
                 func: Arc::new(|_| {
-                    Box::pin(async { HookOutcome::Modify { content: "second".to_string() } })
+                    Box::pin(async {
+                        HookOutcome::Modify {
+                            content: "second".to_string(),
+                        }
+                    })
                 }),
             },
         ]);
@@ -472,7 +480,11 @@ mod tests {
         let hooks = hooks_for_after_agent(vec![
             Hook {
                 func: Arc::new(|_| {
-                    Box::pin(async { HookOutcome::Modify { content: "modified".to_string() } })
+                    Box::pin(async {
+                        HookOutcome::Modify {
+                            content: "modified".to_string(),
+                        }
+                    })
                 }),
             },
             counting_hook(&calls, HookOutcome::Proceed),
