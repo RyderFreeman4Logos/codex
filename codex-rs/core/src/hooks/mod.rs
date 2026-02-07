@@ -1,3 +1,4 @@
+mod config;
 mod executor;
 mod registry;
 mod types;
