@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -7,10 +8,9 @@ use super::executor::command_hook;
 use super::types::Hook;
 
 /// Single hook entry from configuration.
-#[allow(dead_code)] // Will be used when hook config integration is added
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub(crate) struct HookEntryToml {
+pub struct HookEntryToml {
     /// The command to execute as argv (program + args).
     pub command: Vec<String>,
 
@@ -23,16 +23,14 @@ pub(crate) struct HookEntryToml {
     pub matcher: Option<String>,
 }
 
-#[allow(dead_code)] // Will be used when hook config integration is added
 fn default_timeout_secs() -> u64 {
     30
 }
 
 /// All hook entries grouped by event type.
-#[allow(dead_code)] // Will be used when hook config integration is added
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub(crate) struct HooksConfigToml {
+pub struct HooksConfigToml {
     #[serde(default)]
     pub after_agent: Vec<HookEntryToml>,
 
@@ -53,29 +51,48 @@ pub(crate) struct HooksConfigToml {
 }
 
 /// Convert a single HookEntryToml into a Hook via the command executor.
-#[allow(dead_code)] // Will be used when hook config integration is added
+///
+/// If the entry has a matcher pattern, the hook will only execute for events
+/// whose tool name matches the pattern. Non-tool events always match.
 pub(super) fn hook_from_entry(entry: &HookEntryToml) -> Hook {
     let timeout = Duration::from_secs(entry.timeout);
-    command_hook(entry.command.clone(), timeout)
-}
-
-/// Check if a tool name matches a hook's matcher pattern.
-/// If matcher is None, the hook matches all tools.
-/// Supports simple glob patterns: "*" matches anything, "shell*" matches "shell", "shell_exec", etc.
-#[allow(dead_code)] // Will be used when hook config integration is added
-pub(super) fn matches_tool(entry: &HookEntryToml, tool_name: &str) -> bool {
+    let inner = command_hook(entry.command.clone(), timeout);
     match &entry.matcher {
-        None => true,
+        None => inner,
         Some(pattern) => {
-            if pattern == "*" {
-                return true;
+            let pattern = pattern.clone();
+            Hook {
+                func: std::sync::Arc::new(move |payload| {
+                    let tool_name = match &payload.hook_event {
+                        super::types::HookEvent::PreToolUse { event } => Some(&event.tool_name),
+                        super::types::HookEvent::PostToolUse { event } => Some(&event.tool_name),
+                        _ => None, // Non-tool events always match
+                    };
+
+                    if let Some(name) = tool_name
+                        && !matches_pattern(&pattern, name)
+                    {
+                        return Box::pin(async { super::types::HookOutcome::Proceed });
+                    }
+
+                    inner.func.clone()(payload)
+                }),
             }
-            if let Some(prefix) = pattern.strip_suffix('*') {
-                return tool_name.starts_with(prefix);
-            }
-            pattern == tool_name
         }
     }
+}
+
+/// Check if a tool name matches a glob pattern.
+/// Supports: "*" matches anything, "shell*" matches "shell", "shell_exec", etc.,
+/// exact string match for patterns without wildcards.
+fn matches_pattern(pattern: &str, tool_name: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+    if let Some(prefix) = pattern.strip_suffix('*') {
+        return tool_name.starts_with(prefix);
+    }
+    pattern == tool_name
 }
 
 #[cfg(test)]
@@ -83,6 +100,15 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::*;
+
+    /// Check if a tool name matches a hook entry's matcher pattern.
+    /// If matcher is None, the hook matches all tools.
+    fn matches_tool(entry: &HookEntryToml, tool_name: &str) -> bool {
+        match &entry.matcher {
+            None => true,
+            Some(pattern) => matches_pattern(pattern, tool_name),
+        }
+    }
 
     #[test]
     fn test_hook_entry_deserialize_minimal() {

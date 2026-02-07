@@ -1,5 +1,6 @@
 use tokio::process::Command;
 
+use super::config::hook_from_entry;
 use super::types::Hook;
 use super::types::HookEvent;
 use super::types::HookOutcome;
@@ -30,16 +31,43 @@ fn get_notify_hook(config: &Config) -> Option<Hook> {
 impl Hooks {
     // new creates a new Hooks instance from config.
     // For legacy compatibility, if config.notify is set, it will be added to
-    // the after_agent hooks.
+    // the after_agent hooks. New-style hooks from [hooks] config section are
+    // appended after legacy hooks.
     pub(crate) fn new(config: &Config) -> Self {
-        let after_agent = get_notify_hook(config).into_iter().collect();
+        let hooks_config = &config.hooks;
+
+        let mut after_agent: Vec<Hook> = get_notify_hook(config).into_iter().collect();
+        after_agent.extend(hooks_config.after_agent.iter().map(hook_from_entry));
+
+        let pre_tool_use = hooks_config
+            .pre_tool_use
+            .iter()
+            .map(hook_from_entry)
+            .collect();
+        let post_tool_use = hooks_config
+            .post_tool_use
+            .iter()
+            .map(hook_from_entry)
+            .collect();
+        let stop = hooks_config.stop.iter().map(hook_from_entry).collect();
+        let user_prompt_submit = hooks_config
+            .user_prompt_submit
+            .iter()
+            .map(hook_from_entry)
+            .collect();
+        let notification = hooks_config
+            .notification
+            .iter()
+            .map(hook_from_entry)
+            .collect();
+
         Self {
             after_agent,
-            pre_tool_use: Vec::new(),
-            post_tool_use: Vec::new(),
-            stop: Vec::new(),
-            user_prompt_submit: Vec::new(),
-            notification: Vec::new(),
+            pre_tool_use,
+            post_tool_use,
+            stop,
+            user_prompt_submit,
+            notification,
         }
     }
 

@@ -1,4 +1,4 @@
-mod config;
+pub(crate) mod config;
 mod executor;
 mod registry;
 mod types;
