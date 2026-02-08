@@ -128,12 +128,28 @@ pub(crate) async fn handle_output_item_done(
         }
         // The tool request should be answered directly (or was denied); push that response into the transcript.
         Err(FunctionCallError::RespondToModel(message)) => {
-            let response = ResponseInputItem::FunctionCallOutput {
-                call_id: String::new(),
-                output: FunctionCallOutputPayload {
-                    body: FunctionCallOutputBody::Text(message),
-                    ..Default::default()
-                },
+            let is_custom = matches!(&item, ResponseItem::CustomToolCall { .. });
+            let respond_call_id = match &item {
+                ResponseItem::FunctionCall { call_id, .. }
+                | ResponseItem::CustomToolCall { call_id, .. } => call_id.clone(),
+                ResponseItem::LocalShellCall { call_id, id, .. } => {
+                    call_id.clone().or(id.clone()).unwrap_or_default()
+                }
+                _ => String::new(),
+            };
+            let response = if is_custom {
+                ResponseInputItem::CustomToolCallOutput {
+                    call_id: respond_call_id,
+                    output: message,
+                }
+            } else {
+                ResponseInputItem::FunctionCallOutput {
+                    call_id: respond_call_id,
+                    output: FunctionCallOutputPayload {
+                        body: FunctionCallOutputBody::Text(message),
+                        ..Default::default()
+                    },
+                }
             };
             ctx.sess
                 .record_conversation_items(&ctx.turn_context, std::slice::from_ref(&item))
@@ -151,6 +167,7 @@ pub(crate) async fn handle_output_item_done(
         }
         // A tool call was blocked by a pre_tool_use hook; surface the block message back into the transcript.
         Err(FunctionCallError::ToolCallBlocked(message)) => {
+            let is_custom = matches!(&item, ResponseItem::CustomToolCall { .. });
             let blocked_call_id = match &item {
                 ResponseItem::FunctionCall { call_id, .. }
                 | ResponseItem::CustomToolCall { call_id, .. } => call_id.clone(),
@@ -159,12 +176,19 @@ pub(crate) async fn handle_output_item_done(
                 }
                 _ => String::new(),
             };
-            let response = ResponseInputItem::FunctionCallOutput {
-                call_id: blocked_call_id,
-                output: FunctionCallOutputPayload {
-                    body: FunctionCallOutputBody::Text(message),
-                    ..Default::default()
-                },
+            let response = if is_custom {
+                ResponseInputItem::CustomToolCallOutput {
+                    call_id: blocked_call_id,
+                    output: message,
+                }
+            } else {
+                ResponseInputItem::FunctionCallOutput {
+                    call_id: blocked_call_id,
+                    output: FunctionCallOutputPayload {
+                        body: FunctionCallOutputBody::Text(message),
+                        ..Default::default()
+                    },
+                }
             };
             ctx.sess
                 .record_conversation_items(&ctx.turn_context, std::slice::from_ref(&item))
