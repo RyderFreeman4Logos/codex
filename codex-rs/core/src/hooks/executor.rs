@@ -75,6 +75,7 @@ pub(super) fn command_hook(argv: Vec<String>, timeout: Duration) -> Hook {
                 };
 
                 command
+                    .current_dir(&payload.cwd)
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped());
@@ -521,6 +522,49 @@ mod tests {
             );
             let outcome = hook.execute(&test_payload()).await;
             assert_eq!(outcome, HookOutcome::Proceed);
+        }
+
+        #[tokio::test]
+        async fn command_hook_runs_in_payload_cwd() {
+            // Verify that the hook command runs in the payload's cwd directory
+            // by having the script print its working directory via `pwd`.
+            let hook = command_hook(
+                vec![
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    "cat > /dev/null; pwd".to_string(),
+                ],
+                Duration::from_secs(5),
+            );
+            // test_payload() sets cwd to /tmp
+            let outcome = hook.execute(&test_payload()).await;
+            // pwd outputs the working directory; since it's not valid JSON,
+            // the executor falls through to Proceed (fail-open on invalid JSON).
+            // The important thing is that it doesn't fail to spawn, proving
+            // the command runs. We verify cwd more precisely below.
+            assert_eq!(outcome, HookOutcome::Proceed);
+
+            // Now verify with a JSON response that includes the cwd
+            let hook = command_hook(
+                vec![
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    r#"cat > /dev/null; CWD=$(pwd); echo "{\"decision\":\"block\",\"message\":\"$CWD\"}""#
+                        .to_string(),
+                ],
+                Duration::from_secs(5),
+            );
+            let outcome = hook.execute(&test_payload()).await;
+            match outcome {
+                HookOutcome::Block { message } => {
+                    let msg = message.expect("should have cwd message");
+                    assert_eq!(
+                        msg, "/tmp",
+                        "hook should run in payload.cwd (/tmp), got: {msg}"
+                    );
+                }
+                other => panic!("expected Block with cwd message, got {other:?}"),
+            }
         }
     }
 
