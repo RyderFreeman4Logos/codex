@@ -152,8 +152,9 @@ impl ToolRouter {
         let payload_outputs_custom = matches!(payload, ToolPayload::Custom { .. });
         let failure_call_id = call_id.clone();
 
-        // Extract tool input before moving payload into invocation.
-        let tool_input = payload.log_payload().into_owned();
+        // Extract structured tool input for hooks (preserves shell arg
+        // boundaries and workdir overrides, unlike log_payload()).
+        let tool_input = payload.hook_input();
 
         // --- PreToolUse hook ---
         let pre_outcome = session
