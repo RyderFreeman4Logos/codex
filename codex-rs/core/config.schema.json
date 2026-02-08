@@ -423,7 +423,7 @@
         },
         "matcher": {
           "default": null,
-          "description": "Optional matcher pattern for tool-use hooks (glob pattern matching tool name).",
+          "description": "Optional matcher pattern for tool-use hooks.\n\nSupported patterns: - `\"*\"` matches any tool name - `\"prefix*\"` matches tool names starting with `prefix` - `\"exact\"` matches only that exact tool name\n\nNote: suffix patterns like `\"*shell\"` and infix patterns like `\"read_*_file\"` are **not** supported.",
           "type": "string"
         },
         "timeout": {

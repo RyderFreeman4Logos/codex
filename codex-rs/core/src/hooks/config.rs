@@ -18,7 +18,15 @@ pub struct HookEntryToml {
     #[serde(default = "default_timeout_secs")]
     pub timeout: u64,
 
-    /// Optional matcher pattern for tool-use hooks (glob pattern matching tool name).
+    /// Optional matcher pattern for tool-use hooks.
+    ///
+    /// Supported patterns:
+    /// - `"*"` matches any tool name
+    /// - `"prefix*"` matches tool names starting with `prefix`
+    /// - `"exact"` matches only that exact tool name
+    ///
+    /// Note: suffix patterns like `"*shell"` and infix patterns like
+    /// `"read_*_file"` are **not** supported.
     #[serde(default)]
     pub matcher: Option<String>,
 }
@@ -82,9 +90,15 @@ pub(super) fn hook_from_entry(entry: &HookEntryToml) -> Hook {
     }
 }
 
-/// Check if a tool name matches a glob pattern.
-/// Supports: "*" matches anything, "shell*" matches "shell", "shell_exec", etc.,
-/// exact string match for patterns without wildcards.
+/// Check if a tool name matches a simple pattern.
+///
+/// Supports three forms:
+/// - `"*"` matches any tool name.
+/// - `"prefix*"` (trailing wildcard) matches tool names starting with `prefix`.
+/// - Any other string is compared as an exact match.
+///
+/// Full glob semantics (suffix, infix wildcards) are intentionally not
+/// supported to keep the matching logic trivial and predictable.
 fn matches_pattern(pattern: &str, tool_name: &str) -> bool {
     if pattern == "*" {
         return true;
