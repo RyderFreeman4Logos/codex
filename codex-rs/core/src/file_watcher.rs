@@ -11,6 +11,7 @@ use std::sync::RwLock;
 use std::time::Duration;
 
 use notify::Event;
+use notify::EventKind;
 use notify::RecommendedWatcher;
 use notify::RecursiveMode;
 use notify::Watcher;
@@ -19,7 +20,8 @@ use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio::time::sleep_until;
-use tracing::info;
+use tracing::debug;
+use tracing::trace;
 use tracing::warn;
 
 use crate::config::Config;
@@ -163,13 +165,24 @@ impl FileWatcher {
                         res = raw_rx.recv() => {
                             match res {
                                 Some(Ok(event)) => {
-                                    info!(
+                                    let skills_paths = classify_event(&event, &state);
+                                    if skills_paths.is_empty() {
+                                        trace!(
+                                            event_kind = ?event.kind,
+                                            event_paths = ?event.paths,
+                                            event_attrs = ?event.attrs,
+                                            "file watcher ignored filesystem event"
+                                        );
+                                        continue;
+                                    }
+
+                                    debug!(
                                         event_kind = ?event.kind,
                                         event_paths = ?event.paths,
                                         event_attrs = ?event.attrs,
-                                        "file watcher received filesystem event"
+                                        matched_paths = ?skills_paths,
+                                        "file watcher detected skills-related change"
                                     );
-                                    let skills_paths = classify_event(&event, &state);
                                     let now = Instant::now();
                                     skills.add(skills_paths);
 
@@ -245,6 +258,10 @@ impl FileWatcher {
 }
 
 fn classify_event(event: &Event, state: &RwLock<WatchState>) -> Vec<PathBuf> {
+    if !is_relevant_event_kind(&event.kind) {
+        return Vec::new();
+    }
+
     let mut skills_paths = Vec::new();
     let skills_roots = match state.read() {
         Ok(state) => state.skills_roots.clone(),
@@ -261,6 +278,10 @@ fn classify_event(event: &Event, state: &RwLock<WatchState>) -> Vec<PathBuf> {
     }
 
     skills_paths
+}
+
+fn is_relevant_event_kind(kind: &EventKind) -> bool {
+    !matches!(kind, EventKind::Access(_))
 }
 
 fn is_skills_path(path: &Path, roots: &HashSet<PathBuf>) -> bool {
@@ -354,6 +375,21 @@ mod tests {
             classified,
             vec![root_a.join("alpha/SKILL.md"), root_b.join("beta/SKILL.md")]
         );
+    }
+
+    #[test]
+    fn classify_event_ignores_access_events() {
+        let root = path("/tmp/skills");
+        let state = RwLock::new(WatchState {
+            skills_roots: HashSet::from([root.clone()]),
+        });
+        let event = Event::new(EventKind::Access(notify::event::AccessKind::Open(
+            notify::event::AccessMode::Any,
+        )))
+        .add_path(root.join("demo/SKILL.md"));
+
+        let classified = classify_event(&event, &state);
+        assert!(classified.is_empty());
     }
 
     #[test]
