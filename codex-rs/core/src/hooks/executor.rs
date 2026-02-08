@@ -11,11 +11,9 @@ use super::types::HookOutcome;
 use super::types::HookPayload;
 
 /// Maximum bytes to read from a hook command's stdout to prevent unbounded memory usage.
-#[allow(dead_code)] // Will be used when hook config integration is added
 const MAX_STDOUT_BYTES: usize = 1_048_576; // 1MB
 
 /// Maximum bytes to read from a hook command's stderr to prevent unbounded memory usage.
-#[allow(dead_code)] // Will be used when hook config integration is added
 const MAX_STDERR_BYTES: usize = 1_048_576; // 1MB
 
 /// Decision returned by a hook command.
@@ -65,7 +63,6 @@ impl From<HookCommandResult> for HookOutcome {
 /// - Non-zero exit code → `HookOutcome::Block { message: Some(stderr_or_default) }`
 /// - Timeout → `HookOutcome::Block { message: Some("hook timed out") }`
 /// - Spawn failure → log warning and return `HookOutcome::Proceed` (fail-open)
-#[allow(dead_code)] // Will be used when hook config integration is added
 pub(super) fn command_hook(argv: Vec<String>, timeout: Duration) -> Hook {
     Hook {
         func: Arc::new(move |payload: &HookPayload| {
@@ -103,7 +100,7 @@ pub(super) fn command_hook(argv: Vec<String>, timeout: Duration) -> Hook {
                     return HookOutcome::Proceed;
                 };
 
-                // Serialize and write payload to stdin
+                // Serialize payload to JSON before entering the timed block.
                 let payload_json = match serde_json::to_vec(&payload) {
                     Ok(json) => json,
                     Err(err) => {
@@ -112,75 +109,119 @@ pub(super) fn command_hook(argv: Vec<String>, timeout: Duration) -> Hook {
                     }
                 };
 
-                if let Err(err) = stdin.write_all(&payload_json).await {
-                    tracing::warn!("failed to write payload to hook stdin: {err}");
-                    return HookOutcome::Proceed;
-                }
-                drop(stdin); // Close stdin to signal EOF
+                // Wrap the entire IO sequence (stdin write, stdout + stderr
+                // read) in a single timeout so that a misbehaving hook cannot
+                // hang any individual phase indefinitely.  Stdout and stderr
+                // are drained concurrently to avoid pipe deadlocks when a hook
+                // produces verbose output on both streams.
+                let io_result = tokio::time::timeout(timeout, async {
+                    // Write payload to stdin.  If the hook closes stdin
+                    // early (e.g. a short script that ignores input), we
+                    // still need to read its stdout/stderr and exit status
+                    // so that block/modify decisions are not silently lost.
+                    if let Err(err) = stdin.write_all(&payload_json).await {
+                        tracing::warn!("failed to write payload to hook stdin: {err}");
+                    }
+                    drop(stdin); // Close stdin to signal EOF
 
-                // Read stdout with limit
-                let mut stdout_bytes = Vec::new();
-                let read_result = tokio::time::timeout(timeout, async {
-                    let mut buffer = [0u8; 4096];
-                    loop {
-                        match stdout.read(&mut buffer).await {
-                            Ok(0) => break, // EOF
-                            Ok(n) => {
-                                if stdout_bytes.len() + n > MAX_STDOUT_BYTES {
-                                    tracing::warn!(
-                                        "hook stdout exceeded max size of {MAX_STDOUT_BYTES} bytes"
-                                    );
-                                    return Err("stdout too large");
+                    // Drain stdout and stderr concurrently to prevent pipe
+                    // deadlocks (a full stderr buffer can block the child
+                    // before it closes stdout, causing a false timeout).
+                    let read_stdout = async {
+                        let mut bytes = Vec::new();
+                        let mut buf = [0u8; 4096];
+                        let mut capped = false;
+                        loop {
+                            match stdout.read(&mut buf).await {
+                                Ok(0) => break,
+                                Ok(n) => {
+                                    if capped {
+                                        continue; // drain but discard
+                                    }
+                                    if bytes.len() + n > MAX_STDOUT_BYTES {
+                                        // Keep as many bytes as still fit
+                                        // before switching to drain mode.
+                                        let remaining = MAX_STDOUT_BYTES - bytes.len();
+                                        bytes.extend_from_slice(&buf[..remaining]);
+                                        tracing::warn!(
+                                            "hook stdout exceeded max size of {MAX_STDOUT_BYTES} bytes"
+                                        );
+                                        capped = true;
+                                        continue;
+                                    }
+                                    bytes.extend_from_slice(&buf[..n]);
                                 }
-                                stdout_bytes.extend_from_slice(&buffer[..n]);
-                            }
-                            Err(err) => {
-                                tracing::warn!("failed to read hook stdout: {err}");
-                                return Err("read error");
+                                Err(err) => {
+                                    tracing::warn!("failed to read hook stdout: {err}");
+                                    break;
+                                }
                             }
                         }
-                    }
-                    Ok(())
+                        bytes
+                    };
+
+                    let read_stderr = async {
+                        let mut bytes = Vec::new();
+                        let mut buf = [0u8; 4096];
+                        let mut capped = false;
+                        loop {
+                            match stderr.read(&mut buf).await {
+                                Ok(0) => break,
+                                Ok(n) => {
+                                    if capped {
+                                        continue; // drain but discard
+                                    }
+                                    if bytes.len() + n > MAX_STDERR_BYTES {
+                                        bytes.extend_from_slice(
+                                            &buf[..MAX_STDERR_BYTES - bytes.len()],
+                                        );
+                                        tracing::warn!(
+                                            "hook stderr exceeded max size of {MAX_STDERR_BYTES} bytes, truncated"
+                                        );
+                                        capped = true;
+                                        continue;
+                                    }
+                                    bytes.extend_from_slice(&buf[..n]);
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                        String::from_utf8_lossy(&bytes).to_string()
+                    };
+
+                    let (stdout_bytes, stderr_string) =
+                        tokio::join!(read_stdout, read_stderr);
+
+                    (stdout_bytes, stderr_string)
                 })
                 .await;
 
-                // Handle timeout
-                if read_result.is_err() {
-                    let _ = child.kill().await;
-                    return HookOutcome::Block {
-                        message: Some("hook timed out".to_string()),
-                    };
-                }
-
-                // Read stderr (best effort, size-limited to prevent memory exhaustion)
-                let mut stderr_bytes = Vec::new();
-                let mut stderr_buf = [0u8; 4096];
-                loop {
-                    match stderr.read(&mut stderr_buf).await {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            if stderr_bytes.len() + n > MAX_STDERR_BYTES {
-                                stderr_bytes.extend_from_slice(
-                                    &stderr_buf[..MAX_STDERR_BYTES - stderr_bytes.len()],
-                                );
-                                tracing::warn!(
-                                    "hook stderr exceeded max size of {MAX_STDERR_BYTES} bytes, truncated"
-                                );
-                                break;
-                            }
-                            stderr_bytes.extend_from_slice(&stderr_buf[..n]);
-                        }
-                        Err(_) => break,
+                // Handle IO timeout: kill the child and return Block.
+                let (stdout_bytes, stderr_string) = match io_result {
+                    Err(_elapsed) => {
+                        let _ = child.kill().await;
+                        return HookOutcome::Block {
+                            message: Some("hook timed out".to_string()),
+                        };
                     }
-                }
-                let stderr_string = String::from_utf8_lossy(&stderr_bytes).to_string();
+                    Ok(data) => data,
+                };
 
-                // Wait for process to exit
-                let status = match child.wait().await {
-                    Ok(status) => status,
-                    Err(err) => {
+                // Wait for process exit.  Once stdout and stderr are fully
+                // consumed the process should exit promptly; apply a generous
+                // grace period to guard against pathological cases.
+                const WAIT_GRACE: Duration = Duration::from_secs(5);
+                let status = match tokio::time::timeout(WAIT_GRACE, child.wait()).await {
+                    Ok(Ok(status)) => status,
+                    Ok(Err(err)) => {
                         tracing::warn!("failed to wait for hook command: {err}");
                         return HookOutcome::Proceed;
+                    }
+                    Err(_elapsed) => {
+                        let _ = child.kill().await;
+                        return HookOutcome::Block {
+                            message: Some("hook timed out".to_string()),
+                        };
                     }
                 };
 

@@ -147,7 +147,7 @@ impl ToolRouter {
         let ToolCall {
             tool_name,
             call_id,
-            payload,
+            mut payload,
         } = call;
         let payload_outputs_custom = matches!(payload, ToolPayload::Custom { .. });
         let failure_call_id = call_id.clone();
@@ -171,13 +171,36 @@ impl ToolRouter {
             })
             .await;
 
-        if let HookOutcome::Block { message } = pre_outcome {
-            let block_msg = message.unwrap_or_else(|| "Blocked by pre_tool_use hook".to_string());
-            return Ok(Self::failure_response(
-                failure_call_id,
-                payload_outputs_custom,
-                FunctionCallError::ToolCallBlocked(block_msg),
-            ));
+        match pre_outcome {
+            HookOutcome::Proceed => {}
+            HookOutcome::Block { message } => {
+                let block_msg =
+                    message.unwrap_or_else(|| "Blocked by pre_tool_use hook".to_string());
+                return Ok(Self::failure_response(
+                    failure_call_id,
+                    payload_outputs_custom,
+                    FunctionCallError::ToolCallBlocked(block_msg),
+                ));
+            }
+            HookOutcome::Modify { content } => {
+                // Apply the modified content to the tool arguments.
+                match &mut payload {
+                    ToolPayload::Function { arguments } => {
+                        *arguments = content;
+                    }
+                    ToolPayload::Mcp { raw_arguments, .. } => {
+                        *raw_arguments = content;
+                    }
+                    ToolPayload::Custom { input } => {
+                        *input = content;
+                    }
+                    ToolPayload::LocalShell { .. } => {
+                        tracing::warn!(
+                            "pre_tool_use hook returned Modify for LocalShell which is not supported; proceeding without modification"
+                        );
+                    }
+                }
+            }
         }
 
         let invocation = ToolInvocation {
@@ -200,22 +223,28 @@ impl ToolRouter {
         };
 
         // --- PostToolUse hook (fire-and-forget, does not alter the result) ---
+        // Spawned as a background task so that slow/hung post-hooks do not
+        // add latency to the tool response path.
         if let Ok(ref response) = result {
             let tool_output = Self::extract_output_text(response);
-            session
-                .hooks()
-                .dispatch(HookPayload {
-                    session_id: session.conversation_id,
-                    cwd: turn.cwd.clone(),
-                    triggered_at: chrono::Utc::now(),
-                    hook_event: HookEvent::PostToolUse {
-                        event: HookEventPostToolUse {
-                            tool_name,
-                            tool_output,
+            let hooks = session.hooks().clone();
+            let cwd = turn.cwd.clone();
+            let conversation_id = session.conversation_id;
+            tokio::spawn(async move {
+                hooks
+                    .dispatch(HookPayload {
+                        session_id: conversation_id,
+                        cwd,
+                        triggered_at: chrono::Utc::now(),
+                        hook_event: HookEvent::PostToolUse {
+                            event: HookEventPostToolUse {
+                                tool_name,
+                                tool_output,
+                            },
                         },
-                    },
-                })
-                .await;
+                    })
+                    .await;
+            });
         }
 
         result
@@ -227,6 +256,13 @@ impl ToolRouter {
             ResponseInputItem::FunctionCallOutput { output, .. } => {
                 output.body.to_text().unwrap_or_default()
             }
+            ResponseInputItem::McpToolCallOutput { result, .. } => match result {
+                Ok(ctr) => {
+                    let payload: codex_protocol::models::FunctionCallOutputPayload = ctr.into();
+                    payload.body.to_text().unwrap_or_default()
+                }
+                Err(err) => err.clone(),
+            },
             ResponseInputItem::CustomToolCallOutput { output, .. } => output.clone(),
             _ => String::new(),
         }
