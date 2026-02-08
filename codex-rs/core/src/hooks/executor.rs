@@ -43,8 +43,19 @@ impl From<HookCommandResult> for HookOutcome {
             HookDecision::Block => HookOutcome::Block {
                 message: result.message,
             },
-            HookDecision::Modify => HookOutcome::Modify {
-                content: result.content.unwrap_or_default(),
+            HookDecision::Modify => match result.content {
+                Some(content) => HookOutcome::Modify { content },
+                None => {
+                    tracing::warn!(
+                        "hook returned modify decision without content field; \
+                         treating as block to prevent empty input substitution"
+                    );
+                    HookOutcome::Block {
+                        message: Some(
+                            "hook returned modify without content field".to_string(),
+                        ),
+                    }
+                }
             },
         }
     }
@@ -599,6 +610,30 @@ mod tests {
             HookOutcome::Modify {
                 content: "modified content".to_string()
             }
+        );
+
+        // Modify with explicit empty content is allowed
+        let result = HookCommandResult {
+            decision: HookDecision::Modify,
+            message: None,
+            content: Some(String::new()),
+        };
+        assert_eq!(
+            HookOutcome::from(result),
+            HookOutcome::Modify {
+                content: String::new()
+            }
+        );
+
+        // Modify without content field → Block (malformed response)
+        let result = HookCommandResult {
+            decision: HookDecision::Modify,
+            message: None,
+            content: None,
+        };
+        assert!(
+            matches!(HookOutcome::from(result), HookOutcome::Block { .. }),
+            "modify without content should be treated as Block"
         );
     }
 }
