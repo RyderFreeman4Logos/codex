@@ -151,8 +151,16 @@ pub(crate) async fn handle_output_item_done(
         }
         // A tool call was blocked by a pre_tool_use hook; surface the block message back into the transcript.
         Err(FunctionCallError::ToolCallBlocked(message)) => {
+            let blocked_call_id = match &item {
+                ResponseItem::FunctionCall { call_id, .. }
+                | ResponseItem::CustomToolCall { call_id, .. } => call_id.clone(),
+                ResponseItem::LocalShellCall { call_id, id, .. } => {
+                    call_id.clone().or(id.clone()).unwrap_or_default()
+                }
+                _ => String::new(),
+            };
             let response = ResponseInputItem::FunctionCallOutput {
-                call_id: String::new(),
+                call_id: blocked_call_id,
                 output: FunctionCallOutputPayload {
                     body: FunctionCallOutputBody::Text(message),
                     ..Default::default()
