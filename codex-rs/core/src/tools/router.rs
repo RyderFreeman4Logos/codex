@@ -195,9 +195,16 @@ impl ToolRouter {
                         *input = content;
                     }
                     ToolPayload::LocalShell { .. } => {
-                        tracing::warn!(
-                            "pre_tool_use hook returned Modify for LocalShell which is not supported; proceeding without modification"
-                        );
+                        // Modifying shell command structure from a hook is
+                        // not safely supported.  Block the call so the
+                        // hook's policy intent is not silently bypassed.
+                        return Ok(Self::failure_response(
+                            failure_call_id,
+                            payload_outputs_custom,
+                            FunctionCallError::ToolCallBlocked(
+                                "pre_tool_use hook returned Modify for local_shell which is not supported; blocking execution".to_string(),
+                            ),
+                        ));
                     }
                 }
             }
