@@ -157,7 +157,7 @@ pub(super) fn command_hook(argv: Vec<String>, timeout: Duration) -> Hook {
                                 }
                             }
                         }
-                        bytes
+                        (bytes, capped)
                     };
 
                     let read_stderr = async {
@@ -189,15 +189,15 @@ pub(super) fn command_hook(argv: Vec<String>, timeout: Duration) -> Hook {
                         String::from_utf8_lossy(&bytes).to_string()
                     };
 
-                    let (stdout_bytes, stderr_string) =
+                    let ((stdout_bytes, stdout_capped), stderr_string) =
                         tokio::join!(read_stdout, read_stderr);
 
-                    (stdout_bytes, stderr_string)
+                    (stdout_bytes, stdout_capped, stderr_string)
                 })
                 .await;
 
                 // Handle IO timeout: kill the child and return Block.
-                let (stdout_bytes, stderr_string) = match io_result {
+                let (stdout_bytes, stdout_capped, stderr_string) = match io_result {
                     Err(_elapsed) => {
                         let _ = child.kill().await;
                         return HookOutcome::Block {
@@ -240,6 +240,17 @@ pub(super) fn command_hook(argv: Vec<String>, timeout: Duration) -> Hook {
                 // Exit code 0: parse stdout or default to Proceed
                 if stdout_bytes.is_empty() {
                     return HookOutcome::Proceed;
+                }
+
+                // If stdout was truncated, the JSON is likely corrupted.
+                // Block rather than falling through to Proceed, which would
+                // silently bypass the hook's intended decision.
+                if stdout_capped {
+                    return HookOutcome::Block {
+                        message: Some(
+                            "hook stdout exceeded size limit; output truncated and cannot be trusted".to_string(),
+                        ),
+                    };
                 }
 
                 match serde_json::from_slice::<HookCommandResult>(&stdout_bytes) {
