@@ -86,8 +86,10 @@ impl Hooks {
     ///
     /// - If any hook returns `Block`, dispatching stops immediately and
     ///   `Block` is returned.
-    /// - If any hook returns `Modify`, the modified content is carried
-    ///   forward and `Modify` is returned after all hooks run.
+    /// - If any hook returns `Modify`, the last `Modify` result wins and
+    ///   is returned after all hooks run.  Note: subsequent hooks still
+    ///   see the *original* payload (modifications are not carried forward
+    ///   between hooks in the current implementation).
     /// - Otherwise `Proceed` is returned.
     pub(crate) async fn dispatch(&self, hook_payload: HookPayload) -> HookOutcome {
         let mut result = HookOutcome::Proceed;
