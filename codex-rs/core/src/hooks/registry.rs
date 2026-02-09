@@ -1,4 +1,6 @@
+use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use tokio::process::Command;
 use tokio::sync::Semaphore;
@@ -35,6 +37,8 @@ pub(crate) struct Hooks {
     task_completed: Vec<Hook>,
     /// Semaphore to limit concurrent hook executions.
     semaphore: Arc<Semaphore>,
+    /// Tracks which once-hooks have already fired (event_name + hook_index).
+    once_fired: Arc<Mutex<HashSet<String>>>,
 }
 
 impl Default for Hooks {
@@ -55,6 +59,7 @@ impl Default for Hooks {
             pre_compact: Vec::new(),
             task_completed: Vec::new(),
             semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_HOOKS)),
+            once_fired: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 }
@@ -90,71 +95,115 @@ impl Hooks {
                 .flat_map(hooks_from_group),
         );
 
-        let pre_tool_use = hooks_config
+        let pre_tool_use: Vec<Hook> = hooks_config
             .pre_tool_use
             .iter()
             .flat_map(hooks_from_group)
             .collect();
-        let post_tool_use = hooks_config
+        let post_tool_use: Vec<Hook> = hooks_config
             .post_tool_use
             .iter()
             .flat_map(hooks_from_group)
             .collect();
-        let stop = hooks_config
+        let stop: Vec<Hook> = hooks_config
             .stop
             .iter()
             .flat_map(hooks_from_group)
             .collect();
-        let user_prompt_submit = hooks_config
+        let user_prompt_submit: Vec<Hook> = hooks_config
             .user_prompt_submit
             .iter()
             .flat_map(hooks_from_group)
             .collect();
-        let notification = hooks_config
+        let notification: Vec<Hook> = hooks_config
             .notification
             .iter()
             .flat_map(hooks_from_group)
             .collect();
-        let session_start = hooks_config
+        let session_start: Vec<Hook> = hooks_config
             .session_start
             .iter()
             .flat_map(hooks_from_group)
             .collect();
-        let session_end = hooks_config
+        let session_end: Vec<Hook> = hooks_config
             .session_end
             .iter()
             .flat_map(hooks_from_group)
             .collect();
-        let permission_request = hooks_config
+        let permission_request: Vec<Hook> = hooks_config
             .permission_request
             .iter()
             .flat_map(hooks_from_group)
             .collect();
-        let post_tool_use_failure = hooks_config
+        let post_tool_use_failure: Vec<Hook> = hooks_config
             .post_tool_use_failure
             .iter()
             .flat_map(hooks_from_group)
             .collect();
-        let subagent_start = hooks_config
+        let subagent_start: Vec<Hook> = hooks_config
             .subagent_start
             .iter()
             .flat_map(hooks_from_group)
             .collect();
-        let subagent_stop = hooks_config
+        let subagent_stop: Vec<Hook> = hooks_config
             .subagent_stop
             .iter()
             .flat_map(hooks_from_group)
             .collect();
-        let pre_compact = hooks_config
+        let pre_compact: Vec<Hook> = hooks_config
             .pre_compact
             .iter()
             .flat_map(hooks_from_group)
             .collect();
-        let task_completed = hooks_config
+        let task_completed: Vec<Hook> = hooks_config
             .task_completed
             .iter()
             .flat_map(hooks_from_group)
             .collect();
+
+        // Log hook counts for events that have hooks
+        if !after_agent.is_empty() {
+            tracing::info!(event = "after_agent", count = after_agent.len(), "Hooks loaded");
+        }
+        if !pre_tool_use.is_empty() {
+            tracing::info!(event = "pre_tool_use", count = pre_tool_use.len(), "Hooks loaded");
+        }
+        if !post_tool_use.is_empty() {
+            tracing::info!(event = "post_tool_use", count = post_tool_use.len(), "Hooks loaded");
+        }
+        if !stop.is_empty() {
+            tracing::info!(event = "stop", count = stop.len(), "Hooks loaded");
+        }
+        if !user_prompt_submit.is_empty() {
+            tracing::info!(event = "user_prompt_submit", count = user_prompt_submit.len(), "Hooks loaded");
+        }
+        if !notification.is_empty() {
+            tracing::info!(event = "notification", count = notification.len(), "Hooks loaded");
+        }
+        if !session_start.is_empty() {
+            tracing::info!(event = "session_start", count = session_start.len(), "Hooks loaded");
+        }
+        if !session_end.is_empty() {
+            tracing::info!(event = "session_end", count = session_end.len(), "Hooks loaded");
+        }
+        if !permission_request.is_empty() {
+            tracing::info!(event = "permission_request", count = permission_request.len(), "Hooks loaded");
+        }
+        if !post_tool_use_failure.is_empty() {
+            tracing::info!(event = "post_tool_use_failure", count = post_tool_use_failure.len(), "Hooks loaded");
+        }
+        if !subagent_start.is_empty() {
+            tracing::info!(event = "subagent_start", count = subagent_start.len(), "Hooks loaded");
+        }
+        if !subagent_stop.is_empty() {
+            tracing::info!(event = "subagent_stop", count = subagent_stop.len(), "Hooks loaded");
+        }
+        if !pre_compact.is_empty() {
+            tracing::info!(event = "pre_compact", count = pre_compact.len(), "Hooks loaded");
+        }
+        if !task_completed.is_empty() {
+            tracing::info!(event = "task_completed", count = task_completed.len(), "Hooks loaded");
+        }
 
         Self {
             after_agent,
@@ -172,6 +221,7 @@ impl Hooks {
             pre_compact,
             task_completed,
             semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_HOOKS)),
+            once_fired: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -196,39 +246,131 @@ impl Hooks {
 
     /// Dispatch hooks for the given event and return the aggregate effect.
     ///
-    /// Hooks are executed **in parallel** (up to [`MAX_CONCURRENT_HOOKS`]
-    /// concurrently) and their results are aggregated in **config order**
-    /// to ensure deterministic output:
+    /// Hooks are separated into sync and async execution:
     ///
+    /// - **Sync hooks** (is_async=false): Executed **in parallel** (up to
+    ///   [`MAX_CONCURRENT_HOOKS`] concurrently) and their results are
+    ///   aggregated in **config order** to ensure deterministic output.
+    ///
+    /// - **Async hooks** (is_async=true): Spawned as fire-and-forget tasks
+    ///   via `tokio::spawn`. Their results are ignored and do NOT affect
+    ///   the aggregate effect. Logged at debug level when complete.
+    ///
+    /// - **Once hooks** (once=true): Only execute once per session. Tracked
+    ///   by event name + hook index. Skipped on subsequent dispatches.
+    ///
+    /// Aggregation rules for sync hooks:
     /// - If any hook returns `Block`, the final action is `Block` (first
     ///   Block in config order wins for the reason message).
     /// - If any hook returns `Modify`, the last `Modify` in config order
     ///   wins and is stored in [`HookAggregateEffect::modified_content`].
-    /// - System messages, stop reasons, and suppress_output flags are
-    ///   collected from all hooks in config order.
+    /// - System messages, stop reasons, status messages, and suppress_output
+    ///   flags are collected from all hooks in config order.
     /// - Otherwise the action is `Proceed`.
-    pub(crate) async fn dispatch(&self, hook_payload: HookPayload) -> HookAggregateEffect {
+    pub(crate) async fn dispatch(&self, mut hook_payload: HookPayload) -> HookAggregateEffect {
         let hooks = self.hooks_for_event(&hook_payload.hook_event);
         if hooks.is_empty() {
             return HookAggregateEffect::default();
         }
 
-        // Execute all hooks concurrently with semaphore-based throttling.
+        let event_name = &hook_payload.hook_event_name;
+        tracing::debug!(event = %event_name, hook_count = hooks.len(), "Dispatching hooks");
+
+        // Create temporary env file for SessionStart hooks
+        let _env_file_guard = if matches!(hook_payload.hook_event, HookEvent::SessionStart { .. }) {
+            match tempfile::NamedTempFile::new() {
+                Ok(file) => {
+                    hook_payload.env_file_path = Some(file.path().to_path_buf());
+                    Some(file)
+                }
+                Err(err) => {
+                    tracing::warn!("failed to create env file for SessionStart hook: {err}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // Filter hooks based on once tracking and separate sync/async.
+        let mut sync_hooks_with_idx = Vec::new();
+        let mut async_hooks_with_idx = Vec::new();
+
+        for (idx, hook) in hooks.iter().enumerate() {
+            // Check if this is a once-hook that has already fired.
+            if hook.once {
+                let once_key = format!("{event_name}:{idx}");
+                let Ok(mut fired) = self.once_fired.lock() else {
+                    tracing::warn!("Once-fired mutex poisoned, skipping once check");
+                    continue;
+                };
+                if fired.contains(&once_key) {
+                    // Skip this hook, it's already fired.
+                    tracing::debug!(event = %event_name, hook_idx = idx, "Skipping once-hook (already fired)");
+                    continue;
+                }
+                // Mark as fired before execution.
+                fired.insert(once_key);
+            }
+
+            let hook_type = if hook.is_async { "async" } else { "sync" };
+            tracing::debug!(
+                event = %event_name,
+                hook_idx = idx,
+                hook_type = hook_type,
+                once = hook.once,
+                "Executing hook"
+            );
+
+            if hook.is_async {
+                async_hooks_with_idx.push((idx, hook));
+            } else {
+                sync_hooks_with_idx.push((idx, hook));
+            }
+        }
+
+        // Spawn async hooks as fire-and-forget tasks.
+        for (_idx, hook) in async_hooks_with_idx {
+            let hook = hook.clone();
+            let payload = hook_payload.clone();
+            tokio::spawn(async move {
+                let result = hook.execute(&payload).await;
+                tracing::debug!(
+                    event = %payload.hook_event_name,
+                    outcome = ?result.outcome,
+                    "Async hook completed"
+                );
+            });
+        }
+
+        // Execute sync hooks concurrently with semaphore-based throttling.
+        if sync_hooks_with_idx.is_empty() {
+            return HookAggregateEffect::default();
+        }
+
         let semaphore = &self.semaphore;
         let payload_ref = &hook_payload;
-        let results: Vec<HookResult> =
-            futures::future::join_all(hooks.iter().map(|hook| async move {
+        let results: Vec<(usize, HookResult)> =
+            futures::future::join_all(sync_hooks_with_idx.iter().map(|(idx, hook)| async move {
                 // Semaphore is never closed during dispatch, so acquire always succeeds.
                 let Ok(_permit) = semaphore.acquire().await else {
-                    return HookResult::default();
+                    return (*idx, HookResult::default());
                 };
-                hook.execute(payload_ref).await
+                (*idx, hook.execute(payload_ref).await)
             }))
             .await;
 
         // Aggregate results in config order (deterministic).
         let mut effect = HookAggregateEffect::default();
-        for result in results {
+
+        // Collect status messages from hooks that have them (before execution).
+        for (_idx, hook) in &sync_hooks_with_idx {
+            if let Some(ref status_msg) = hook.status_message {
+                effect.status_messages.push(status_msg.clone());
+            }
+        }
+
+        for (_idx, result) in results {
             // Collect metadata from this hook's output.
             if let Some(msg) = result.meta.system_message {
                 effect.system_messages.push(msg);
@@ -238,6 +380,11 @@ impl Hooks {
             }
             if let Some(so) = result.meta.suppress_output {
                 effect.suppress_output = so;
+            }
+
+            // Merge environment variables (later hooks override earlier ones)
+            for (key, value) in result.env_vars {
+                effect.env_vars.insert(key, value);
             }
 
             match result.outcome {
@@ -259,6 +406,16 @@ impl Hooks {
                 HookOutcome::Proceed => {}
             }
         }
+
+        // Log aggregated result
+        tracing::debug!(
+            event = %event_name,
+            action = ?effect.action,
+            system_messages = effect.system_messages.len(),
+            env_vars = effect.env_vars.len(),
+            "Hook dispatch completed"
+        );
+
         effect
     }
 }
@@ -307,6 +464,7 @@ pub(super) fn command_from_argv(argv: &[String]) -> Option<Command> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::fs;
     use std::path::PathBuf;
     use std::process::Stdio;
@@ -361,12 +519,16 @@ mod tests {
             transcript_path: None,
             permission_mode: "on-request".to_string(),
             hook_event,
+            env_file_path: None,
         }
     }
 
     fn counting_hook(calls: &Arc<AtomicUsize>, outcome: HookOutcome) -> Hook {
         let calls = Arc::clone(calls);
         Hook {
+            is_async: false,
+            once: false,
+            status_message: None,
             func: Arc::new(move |_| {
                 let calls = Arc::clone(&calls);
                 let outcome = outcome.clone();
@@ -419,6 +581,7 @@ mod tests {
             transcript_path: None,
             permission_mode: "on-request".to_string(),
             hook_event,
+            env_file_path: None,
         }
     }
 
@@ -442,6 +605,7 @@ mod tests {
             transcript_path: None,
             permission_mode: "on-request".to_string(),
             hook_event,
+            env_file_path: None,
         }
     }
 
@@ -589,6 +753,9 @@ mod tests {
         let payload_path = temp_dir.path().join("payload.json");
         let payload_path_arg = payload_path.to_string_lossy().into_owned();
         let hook = Hook {
+            is_async: false,
+            once: false,
+            status_message: None,
             func: Arc::new(move |payload: &HookPayload| {
                 let payload_path_arg = payload_path_arg.clone();
                 Box::pin(async move {
@@ -640,6 +807,9 @@ mod tests {
         fs::write(&script_path, "[IO.File]::WriteAllText($args[0], $args[1])")?;
         let script_path_arg = script_path.to_string_lossy().into_owned();
         let hook = Hook {
+            is_async: false,
+            once: false,
+            status_message: None,
             func: Arc::new(move |payload: &HookPayload| {
                 let payload_path_arg = payload_path_arg.clone();
                 let script_path_arg = script_path_arg.clone();
@@ -732,7 +902,10 @@ mod tests {
     async fn dispatch_modify_outcome_is_carried_forward() {
         let hooks = hooks_for_after_agent(vec![
             Hook {
-                func: Arc::new(|_| {
+            is_async: false,
+            once: false,
+            status_message: None,
+            func: Arc::new(|_| {
                     Box::pin(async {
                         HookResult::from(HookOutcome::Modify {
                             content: "first".to_string(),
@@ -741,10 +914,16 @@ mod tests {
                 }),
             },
             Hook {
-                func: Arc::new(|_| Box::pin(async { HookResult::from(HookOutcome::Proceed) })),
+            is_async: false,
+            once: false,
+            status_message: None,
+            func: Arc::new(|_| Box::pin(async { HookResult::from(HookOutcome::Proceed) })),
             },
             Hook {
-                func: Arc::new(|_| {
+            is_async: false,
+            once: false,
+            status_message: None,
+            func: Arc::new(|_| {
                     Box::pin(async {
                         HookResult::from(HookOutcome::Modify {
                             content: "second".to_string(),
@@ -768,7 +947,10 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let hooks = hooks_for_after_agent(vec![
             Hook {
-                func: Arc::new(|_| {
+            is_async: false,
+            once: false,
+            status_message: None,
+            func: Arc::new(|_| {
                     Box::pin(async {
                         HookResult::from(HookOutcome::Modify {
                             content: "modified".to_string(),
@@ -793,7 +975,10 @@ mod tests {
     async fn dispatch_proceed_returns_default_aggregate_effect() {
         let hooks = hooks_for_after_agent(vec![
             Hook {
-                func: Arc::new(|_| Box::pin(async { HookResult::from(HookOutcome::Proceed) })),
+            is_async: false,
+            once: false,
+            status_message: None,
+            func: Arc::new(|_| Box::pin(async { HookResult::from(HookOutcome::Proceed) })),
             },
         ]);
 
@@ -806,6 +991,9 @@ mod tests {
     #[tokio::test]
     async fn dispatch_block_returns_block_aggregate_effect() {
         let hooks = hooks_for_after_agent(vec![Hook {
+            is_async: false,
+            once: false,
+            status_message: None,
             func: Arc::new(|_| {
                 Box::pin(async {
                     HookResult::from(HookOutcome::Block {
@@ -828,6 +1016,9 @@ mod tests {
     #[tokio::test]
     async fn dispatch_block_without_message_uses_default_reason() {
         let hooks = hooks_for_after_agent(vec![Hook {
+            is_async: false,
+            once: false,
+            status_message: None,
             func: Arc::new(|_| {
                 Box::pin(async { HookResult::from(HookOutcome::Block { message: None }) })
             }),
@@ -858,7 +1049,10 @@ mod tests {
                 let barrier = Arc::clone(&barrier);
                 let calls = Arc::clone(&calls);
                 Hook {
-                    func: Arc::new(move |_| {
+            is_async: false,
+            once: false,
+            status_message: None,
+            func: Arc::new(move |_| {
                         let barrier = Arc::clone(&barrier);
                         let calls = Arc::clone(&calls);
                         Box::pin(async move {
@@ -891,7 +1085,10 @@ mod tests {
     async fn dispatch_first_block_in_config_order_wins() {
         let hooks = hooks_for_after_agent(vec![
             Hook {
-                func: Arc::new(|_| {
+            is_async: false,
+            once: false,
+            status_message: None,
+            func: Arc::new(|_| {
                     Box::pin(async {
                         HookResult::from(HookOutcome::Block {
                             message: Some("first".to_string()),
@@ -900,7 +1097,10 @@ mod tests {
                 }),
             },
             Hook {
-                func: Arc::new(|_| {
+            is_async: false,
+            once: false,
+            status_message: None,
+            func: Arc::new(|_| {
                     Box::pin(async {
                         HookResult::from(HookOutcome::Block {
                             message: Some("second".to_string()),
@@ -927,7 +1127,10 @@ mod tests {
 
         let hooks = hooks_for_after_agent(vec![
             Hook {
-                func: Arc::new(|_| {
+            is_async: false,
+            once: false,
+            status_message: None,
+            func: Arc::new(|_| {
                     Box::pin(async {
                         HookResult {
                             outcome: HookOutcome::Proceed,
@@ -936,12 +1139,16 @@ mod tests {
                                 stop_reason: Some("reason1".to_string()),
                                 suppress_output: Some(false),
                             },
+                            env_vars: HashMap::new(),
                         }
                     })
                 }),
             },
             Hook {
-                func: Arc::new(|_| {
+            is_async: false,
+            once: false,
+            status_message: None,
+            func: Arc::new(|_| {
                     Box::pin(async {
                         HookResult {
                             outcome: HookOutcome::Proceed,
@@ -950,6 +1157,7 @@ mod tests {
                                 stop_reason: Some("reason2".to_string()),
                                 suppress_output: Some(true),
                             },
+                            env_vars: HashMap::new(),
                         }
                     })
                 }),
@@ -962,5 +1170,307 @@ mod tests {
         assert_eq!(effect.stop_reason, Some("reason2".to_string()));
         // Last writer wins for suppress_output.
         assert!(effect.suppress_output);
+    }
+
+    /// Async hooks are spawned as fire-and-forget and don't block dispatch.
+    #[tokio::test]
+    async fn dispatch_async_hooks_dont_block() {
+        use std::time::Duration;
+        use tokio::time::Instant;
+
+        let slow_async_hook = Hook {
+            is_async: true,
+            once: false,
+            status_message: None,
+            func: Arc::new(|_| {
+                Box::pin(async {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    HookResult::from(HookOutcome::Proceed)
+                })
+            }),
+        };
+
+        let hooks = hooks_for_after_agent(vec![slow_async_hook]);
+
+        let start = Instant::now();
+        let effect = hooks.dispatch(hook_payload("1")).await;
+        let elapsed = start.elapsed();
+
+        // Dispatch should return immediately (< 50ms) even though async hook takes 100ms
+        assert!(elapsed < Duration::from_millis(50));
+        // Async hook results don't affect aggregate effect
+        assert_eq!(effect.action, EffectAction::Proceed);
+        assert_eq!(effect.modified_content, None);
+    }
+
+    /// Async hooks results don't affect aggregate effect.
+    #[tokio::test]
+    async fn dispatch_async_hooks_results_ignored() {
+        let async_block_hook = Hook {
+            is_async: true,
+            once: false,
+            status_message: None,
+            func: Arc::new(|_| {
+                Box::pin(async {
+                    HookResult::from(HookOutcome::Block {
+                        message: Some("should be ignored".to_string()),
+                    })
+                })
+            }),
+        };
+
+        let async_modify_hook = Hook {
+            is_async: true,
+            once: false,
+            status_message: None,
+            func: Arc::new(|_| {
+                Box::pin(async {
+                    HookResult::from(HookOutcome::Modify {
+                        content: "should be ignored".to_string(),
+                    })
+                })
+            }),
+        };
+
+        let hooks = hooks_for_after_agent(vec![async_block_hook, async_modify_hook]);
+
+        let effect = hooks.dispatch(hook_payload("1")).await;
+        // Async hooks don't affect the aggregate effect
+        assert_eq!(effect.action, EffectAction::Proceed);
+        assert_eq!(effect.modified_content, None);
+    }
+
+    /// Mix of sync and async hooks: only sync hooks affect result.
+    #[tokio::test]
+    async fn dispatch_mixed_sync_async_hooks() {
+        let sync_hook = Hook {
+            is_async: false,
+            once: false,
+            status_message: None,
+            func: Arc::new(|_| {
+                Box::pin(async {
+                    HookResult::from(HookOutcome::Modify {
+                        content: "sync modified".to_string(),
+                    })
+                })
+            }),
+        };
+
+        let async_hook = Hook {
+            is_async: true,
+            once: false,
+            status_message: None,
+            func: Arc::new(|_| {
+                Box::pin(async {
+                    HookResult::from(HookOutcome::Block {
+                        message: Some("async block ignored".to_string()),
+                    })
+                })
+            }),
+        };
+
+        let hooks = hooks_for_after_agent(vec![async_hook, sync_hook]);
+
+        let effect = hooks.dispatch(hook_payload("1")).await;
+        // Only sync hook affects result
+        assert_eq!(effect.action, EffectAction::Proceed);
+        assert_eq!(effect.modified_content, Some("sync modified".to_string()));
+    }
+
+    /// Hooks with once=true only execute once per session.
+    #[tokio::test]
+    async fn dispatch_once_hook_executes_once() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_clone = Arc::clone(&calls);
+        let once_hook = Hook {
+            is_async: false,
+            once: true,
+            status_message: None,
+            func: Arc::new(move |_| {
+                let calls = Arc::clone(&calls_clone);
+                Box::pin(async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    HookResult::from(HookOutcome::Proceed)
+                })
+            }),
+        };
+
+        let hooks = hooks_for_after_agent(vec![once_hook]);
+
+        // First dispatch: hook should execute
+        hooks.dispatch(hook_payload("1")).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // Second dispatch: hook should be skipped
+        hooks.dispatch(hook_payload("2")).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // Third dispatch: still skipped
+        hooks.dispatch(hook_payload("3")).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// Hooks without once=true execute every time.
+    #[tokio::test]
+    async fn dispatch_normal_hook_executes_every_time() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let normal_hook = counting_hook(&calls, HookOutcome::Proceed);
+
+        let hooks = hooks_for_after_agent(vec![normal_hook]);
+
+        hooks.dispatch(hook_payload("1")).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        hooks.dispatch(hook_payload("2")).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        hooks.dispatch(hook_payload("3")).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    /// Status messages from hooks are collected in aggregate effect.
+    #[tokio::test]
+    async fn dispatch_status_messages_collected() {
+        let hook1 = Hook {
+            is_async: false,
+            once: false,
+            status_message: Some("Checking permissions...".to_string()),
+            func: Arc::new(|_| Box::pin(async { HookResult::from(HookOutcome::Proceed) })),
+        };
+
+        let hook2 = Hook {
+            is_async: false,
+            once: false,
+            status_message: Some("Running security audit...".to_string()),
+            func: Arc::new(|_| Box::pin(async { HookResult::from(HookOutcome::Proceed) })),
+        };
+
+        let hook3 = Hook {
+            is_async: false,
+            once: false,
+            status_message: None,
+            func: Arc::new(|_| Box::pin(async { HookResult::from(HookOutcome::Proceed) })),
+        };
+
+        let hooks = hooks_for_after_agent(vec![hook1, hook2, hook3]);
+
+        let effect = hooks.dispatch(hook_payload("1")).await;
+        assert_eq!(effect.status_messages, vec![
+            "Checking permissions...",
+            "Running security audit..."
+        ]);
+    }
+
+    /// SessionStart hooks receive CLAUDE_ENV_FILE and env_vars are aggregated
+    #[tokio::test]
+    async fn dispatch_session_start_creates_env_file() {
+        use super::super::types::HookEventSessionStart;
+
+        let hook_event = HookEvent::SessionStart {
+            event: HookEventSessionStart {
+                source: "cli".to_string(),
+                model: "claude-opus-4-6".to_string(),
+                agent_type: "codex".to_string(),
+            },
+        };
+        let payload = HookPayload {
+            session_id: ThreadId::new(),
+            cwd: PathBuf::from(CWD),
+            triggered_at: Utc
+                .with_ymd_and_hms(2025, 1, 1, 0, 0, 0)
+                .single()
+                .expect("valid timestamp"),
+            hook_event_name: hook_event.hook_event_name().to_string(),
+            transcript_path: None,
+            permission_mode: "on-request".to_string(),
+            hook_event,
+            env_file_path: None,
+        };
+
+        let hook1 = Hook {
+            is_async: false,
+            once: false,
+            status_message: None,
+            func: Arc::new(|_| {
+                Box::pin(async {
+                    let mut result = HookResult::from(HookOutcome::Proceed);
+                    result.env_vars.insert("FOO".to_string(), "bar".to_string());
+                    result
+                })
+            }),
+        };
+
+        let hook2 = Hook {
+            is_async: false,
+            once: false,
+            status_message: None,
+            func: Arc::new(|_| {
+                Box::pin(async {
+                    let mut result = HookResult::from(HookOutcome::Proceed);
+                    result.env_vars.insert("BAZ".to_string(), "qux".to_string());
+                    result.env_vars.insert("FOO".to_string(), "overridden".to_string());
+                    result
+                })
+            }),
+        };
+
+        let hooks = Hooks {
+            session_start: vec![hook1, hook2],
+            ..Default::default()
+        };
+
+        let effect = hooks.dispatch(payload).await;
+        assert_eq!(effect.action, EffectAction::Proceed);
+        assert_eq!(effect.env_vars.len(), 2);
+        assert_eq!(effect.env_vars.get("BAZ"), Some(&"qux".to_string()));
+        // Later hook overrides earlier one
+        assert_eq!(effect.env_vars.get("FOO"), Some(&"overridden".to_string()));
+    }
+
+    /// Multiple once-hooks are tracked independently by index.
+    #[tokio::test]
+    async fn dispatch_multiple_once_hooks_tracked_independently() {
+        let calls1 = Arc::new(AtomicUsize::new(0));
+        let calls2 = Arc::new(AtomicUsize::new(0));
+
+        let calls1_clone = Arc::clone(&calls1);
+        let once_hook1 = Hook {
+            is_async: false,
+            once: true,
+            status_message: None,
+            func: Arc::new(move |_| {
+                let calls1 = Arc::clone(&calls1_clone);
+                Box::pin(async move {
+                    calls1.fetch_add(1, Ordering::SeqCst);
+                    HookResult::from(HookOutcome::Proceed)
+                })
+            }),
+        };
+
+        let calls2_clone = Arc::clone(&calls2);
+        let once_hook2 = Hook {
+            is_async: false,
+            once: true,
+            status_message: None,
+            func: Arc::new(move |_| {
+                let calls2 = Arc::clone(&calls2_clone);
+                Box::pin(async move {
+                    calls2.fetch_add(1, Ordering::SeqCst);
+                    HookResult::from(HookOutcome::Proceed)
+                })
+            }),
+        };
+
+        let hooks = hooks_for_after_agent(vec![once_hook1, once_hook2]);
+
+        // First dispatch: both hooks execute
+        hooks.dispatch(hook_payload("1")).await;
+        assert_eq!(calls1.load(Ordering::SeqCst), 1);
+        assert_eq!(calls2.load(Ordering::SeqCst), 1);
+
+        // Second dispatch: both skipped
+        hooks.dispatch(hook_payload("2")).await;
+        assert_eq!(calls1.load(Ordering::SeqCst), 1);
+        assert_eq!(calls2.load(Ordering::SeqCst), 1);
     }
 }

@@ -53,6 +53,19 @@ pub struct HookEntryToml {
     /// If regex compilation fails, a warning is logged and the hook won't match any tools.
     #[serde(default)]
     pub matcher: Option<String>,
+
+    /// If true, hook is spawned as fire-and-forget task (does not block dispatch).
+    /// Serialized as "async" in TOML/JSON (renamed from async_execution).
+    #[serde(default, rename = "async")]
+    pub async_execution: bool,
+
+    /// When true, this hook only executes once per session.
+    #[serde(default)]
+    pub once: bool,
+
+    /// Status message displayed while hook is executing.
+    #[serde(default)]
+    pub status_message: Option<String>,
 }
 
 /// Single command in a matcher group (new grouped format).
@@ -65,6 +78,19 @@ pub struct HookCommandToml {
     /// Optional timeout in seconds (default: 600, matching Claude Code).
     #[serde(default = "default_timeout_secs")]
     pub timeout: u64,
+
+    /// If true, hook is spawned as fire-and-forget task (does not block dispatch).
+    /// Serialized as "async" in TOML/JSON (renamed from async_execution).
+    #[serde(default, rename = "async")]
+    pub async_execution: bool,
+
+    /// When true, this hook only executes once per session.
+    #[serde(default)]
+    pub once: bool,
+
+    /// Status message displayed while hook is executing.
+    #[serde(default)]
+    pub status_message: Option<String>,
 }
 
 /// Matcher group with optional pattern and multiple commands.
@@ -114,6 +140,19 @@ pub struct MatcherGroupToml {
     /// Timeout for the command (old flat format, applies when `command` is present).
     #[serde(default = "default_timeout_secs")]
     pub timeout: u64,
+
+    /// If true, hook is spawned as fire-and-forget task (old flat format).
+    /// Serialized as "async" in TOML/JSON (renamed from async_execution).
+    #[serde(default, rename = "async")]
+    pub async_execution: bool,
+
+    /// When true, this hook only executes once per session (old flat format).
+    #[serde(default)]
+    pub once: bool,
+
+    /// Status message displayed while hook is executing (old flat format).
+    #[serde(default)]
+    pub status_message: Option<String>,
 }
 
 fn default_timeout_secs() -> u64 {
@@ -233,9 +272,23 @@ fn matcher_field_for_event(event: &super::types::HookEvent) -> Option<&str> {
 pub(super) fn hook_from_entry(entry: &HookEntryToml) -> Hook {
     let timeout = Duration::from_secs(entry.timeout);
     let inner = command_hook(entry.command.clone(), timeout);
+    let is_async = entry.async_execution;
+    let once = entry.once;
+    let status_message = entry.status_message.clone();
+
     match &entry.matcher {
-        None => inner,
-        Some(pattern) if pattern.is_empty() || pattern == "*" => inner,
+        None => Hook {
+            func: inner.func,
+            is_async,
+            once,
+            status_message,
+        },
+        Some(pattern) if pattern.is_empty() || pattern == "*" => Hook {
+            func: inner.func,
+            is_async,
+            once,
+            status_message,
+        },
         Some(pattern) => {
             // Pre-compile the regex once and share it via Arc
             let regex = match Regex::new(pattern) {
@@ -266,6 +319,9 @@ pub(super) fn hook_from_entry(entry: &HookEntryToml) -> Hook {
                         inner.func.clone()(payload)
                     }
                 }),
+                is_async,
+                once,
+                status_message,
             }
         }
     }
@@ -282,15 +338,33 @@ pub(super) fn hook_from_entry(entry: &HookEntryToml) -> Hook {
 pub(super) fn hooks_from_group(group: &MatcherGroupToml) -> Vec<Hook> {
     // Old flat format: command field is present
     if let Some(ref cmd) = group.command {
+        let matcher_info = group.matcher.as_deref().unwrap_or("*");
+        tracing::debug!(
+            matcher = matcher_info,
+            commands = 1,
+            "Building hooks from group (old format)"
+        );
         let entry = HookEntryToml {
             command: cmd.clone(),
             timeout: group.timeout,
             matcher: group.matcher.clone(),
+            async_execution: group.async_execution,
+            once: group.once,
+            status_message: group.status_message.clone(),
         };
         return vec![hook_from_entry(&entry)];
     }
 
     // New grouped format: commands array
+    if !group.commands.is_empty() {
+        let matcher_info = group.matcher.as_deref().unwrap_or("*");
+        tracing::debug!(
+            matcher = matcher_info,
+            commands = group.commands.len(),
+            "Building hooks from group (new format)"
+        );
+    }
+
     group
         .commands
         .iter()
@@ -299,6 +373,9 @@ pub(super) fn hooks_from_group(group: &MatcherGroupToml) -> Vec<Hook> {
                 command: hook_cmd.command.clone(),
                 timeout: hook_cmd.timeout,
                 matcher: group.matcher.clone(),
+                async_execution: hook_cmd.async_execution,
+                once: hook_cmd.once,
+                status_message: hook_cmd.status_message.clone(),
             };
             hook_from_entry(&entry)
         })
@@ -522,6 +599,9 @@ mod tests {
             timeout: 600,
             matcher: None,
             commands: Vec::new(),
+            async_execution: false,
+            once: false,
+            status_message: None,
         };
         assert!(matches_tool(&group, "shell"));
         assert!(matches_tool(&group, "read"));
@@ -535,6 +615,9 @@ mod tests {
             timeout: 600,
             matcher: Some("^shell$".to_string()),
             commands: Vec::new(),
+            async_execution: false,
+            once: false,
+            status_message: None,
         };
         assert!(matches_tool(&group, "shell"));
         assert!(!matches_tool(&group, "shell_exec"));
@@ -548,6 +631,9 @@ mod tests {
             timeout: 600,
             matcher: Some("shell.*".to_string()),
             commands: Vec::new(),
+            async_execution: false,
+            once: false,
+            status_message: None,
         };
         assert!(matches_tool(&group, "shell"));
         assert!(matches_tool(&group, "shell_exec"));
@@ -562,6 +648,9 @@ mod tests {
             timeout: 600,
             matcher: Some("*".to_string()),
             commands: Vec::new(),
+            async_execution: false,
+            once: false,
+            status_message: None,
         };
         assert!(matches_tool(&group, "shell"));
         assert!(matches_tool(&group, "read"));
@@ -576,6 +665,9 @@ mod tests {
             timeout: 600,
             matcher: Some("^read$".to_string()),
             commands: Vec::new(),
+            async_execution: false,
+            once: false,
+            status_message: None,
         };
         assert!(matches_tool(&group, "read"));
         assert!(!matches_tool(&group, "write"));
@@ -650,6 +742,9 @@ mod tests {
             timeout: 600,
             matcher: Some("mcp__.*__write.*".to_string()),
             commands: Vec::new(),
+            async_execution: false,
+            once: false,
+            status_message: None,
         };
         assert!(matches_tool(&group, "mcp__memory__write_note"));
         assert!(matches_tool(&group, "mcp__storage__write_file"));
@@ -665,6 +760,9 @@ mod tests {
             timeout: 600,
             matcher: Some("^Bash$".to_string()),
             commands: Vec::new(),
+            async_execution: false,
+            once: false,
+            status_message: None,
         };
         assert!(matches_tool(&group, "Bash"));
         assert!(!matches_tool(&group, "bash"));
@@ -679,6 +777,9 @@ mod tests {
             timeout: 600,
             matcher: Some("".to_string()),
             commands: Vec::new(),
+            async_execution: false,
+            once: false,
+            status_message: None,
         };
         assert!(matches_tool(&group, "anything"));
         assert!(matches_tool(&group, "Bash"));
@@ -692,6 +793,9 @@ mod tests {
             timeout: 600,
             matcher: Some("[invalid(".to_string()),
             commands: Vec::new(),
+            async_execution: false,
+            once: false,
+            status_message: None,
         };
         // Invalid regex should not match anything
         assert!(!matches_tool(&group, "anything"));
@@ -747,6 +851,9 @@ mod tests {
             timeout: 30,
             matcher: Some("^Bash$".to_string()),
             commands: Vec::new(),
+            async_execution: false,
+            once: false,
+            status_message: None,
         };
         let hooks = hooks_from_group(&group);
         assert_eq!(hooks.len(), 1);
@@ -761,7 +868,13 @@ mod tests {
             commands: vec![HookCommandToml {
                 command: CommandSpec::Argv(vec!["./hook.sh".to_string()]),
                 timeout: 30,
+                async_execution: false,
+            once: false,
+            status_message: None,
             }],
+            async_execution: false,
+            once: false,
+            status_message: None,
         };
         let hooks = hooks_from_group(&group);
         assert_eq!(hooks.len(), 1);
@@ -777,12 +890,21 @@ mod tests {
                 HookCommandToml {
                     command: CommandSpec::Argv(vec!["./hook1.sh".to_string()]),
                     timeout: 30,
+                    async_execution: false,
+            once: false,
+            status_message: None,
                 },
                 HookCommandToml {
                     command: CommandSpec::Argv(vec!["./hook2.sh".to_string()]),
                     timeout: 60,
+                    async_execution: false,
+            once: false,
+            status_message: None,
                 },
             ],
+            async_execution: false,
+            once: false,
+            status_message: None,
         };
         let hooks = hooks_from_group(&group);
         assert_eq!(hooks.len(), 2);
@@ -795,6 +917,9 @@ mod tests {
             timeout: 600,
             matcher: Some("^Bash$".to_string()),
             commands: Vec::new(),
+            async_execution: false,
+            once: false,
+            status_message: None,
         };
         let hooks = hooks_from_group(&group);
         assert_eq!(hooks.len(), 0);
@@ -841,6 +966,9 @@ mod tests {
             command: CommandSpec::Argv(vec!["echo".to_string(), "test".to_string()]),
             timeout: 5,
             matcher: None,
+            async_execution: false,
+            once: false,
+            status_message: None,
         };
 
         let hook = hook_from_entry(&entry);
@@ -873,6 +1001,7 @@ mod tests {
             transcript_path: None,
             permission_mode: "on-request".to_string(),
             hook_event,
+            env_file_path: None,
         };
 
         // Hook should execute without panicking
@@ -891,12 +1020,18 @@ mod tests {
                 timeout: 600,
                 matcher: Some("^Bash$".to_string()),
                 commands: Vec::new(),
+            async_execution: false,
+            once: false,
+            status_message: None,
             }],
             after_agent: vec![MatcherGroupToml {
                 command: Some(CommandSpec::Argv(vec!["./base-after.sh".to_string()])),
                 timeout: 600,
                 matcher: None,
                 commands: Vec::new(),
+            async_execution: false,
+            once: false,
+            status_message: None,
             }],
             ..Default::default()
         };
@@ -907,12 +1042,18 @@ mod tests {
                 timeout: 600,
                 matcher: Some("^Read$".to_string()),
                 commands: Vec::new(),
+            async_execution: false,
+            once: false,
+            status_message: None,
             }],
             post_tool_use: vec![MatcherGroupToml {
                 command: Some(CommandSpec::Argv(vec!["./post-hook.sh".to_string()])),
                 timeout: 600,
                 matcher: None,
                 commands: Vec::new(),
+            async_execution: false,
+            once: false,
+            status_message: None,
             }],
             ..Default::default()
         };
@@ -954,6 +1095,9 @@ mod tests {
                 timeout: 600,
                 matcher: None,
                 commands: Vec::new(),
+            async_execution: false,
+            once: false,
+            status_message: None,
             }],
             ..Default::default()
         };
@@ -996,6 +1140,9 @@ mod tests {
                 timeout: 600,
                 matcher: None,
                 commands: Vec::new(),
+            async_execution: false,
+            once: false,
+            status_message: None,
             }],
             ..Default::default()
         };
@@ -1017,6 +1164,9 @@ mod tests {
                 timeout: 600,
                 matcher: None,
                 commands: Vec::new(),
+            async_execution: false,
+            once: false,
+            status_message: None,
             }],
             ..Default::default()
         };
@@ -1034,6 +1184,43 @@ mod tests {
     }
 
     #[test]
+    fn test_async_execution_deserializes_correctly() {
+        let toml_str = r#"
+            [[pre_tool_use]]
+            command = ["./async-hook.sh"]
+            async = true
+
+            [[pre_tool_use]]
+            command = ["./sync-hook.sh"]
+        "#;
+        let config: HooksConfigToml = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.pre_tool_use.len(), 2);
+        assert!(config.pre_tool_use[0].async_execution);
+        assert!(!config.pre_tool_use[1].async_execution); // defaults to false
+    }
+
+    #[test]
+    fn test_async_execution_in_new_grouped_format() {
+        let toml_str = r#"
+            [[pre_tool_use]]
+            matcher = "^Bash$"
+
+            [[pre_tool_use.commands]]
+            command = ["./hook1.sh"]
+            async = true
+
+            [[pre_tool_use.commands]]
+            command = ["./hook2.sh"]
+            async = false
+        "#;
+        let config: HooksConfigToml = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.pre_tool_use.len(), 1);
+        assert_eq!(config.pre_tool_use[0].commands.len(), 2);
+        assert!(config.pre_tool_use[0].commands[0].async_execution);
+        assert!(!config.pre_tool_use[0].commands[1].async_execution);
+    }
+
+    #[test]
     fn test_merge_from_order_preservation() {
         let mut global = HooksConfigToml {
             pre_tool_use: vec![MatcherGroupToml {
@@ -1041,6 +1228,9 @@ mod tests {
                 timeout: 600,
                 matcher: None,
                 commands: Vec::new(),
+            async_execution: false,
+            once: false,
+            status_message: None,
             }],
             ..Default::default()
         };
@@ -1051,6 +1241,9 @@ mod tests {
                 timeout: 600,
                 matcher: None,
                 commands: Vec::new(),
+            async_execution: false,
+            once: false,
+            status_message: None,
             }],
             ..Default::default()
         };
@@ -1061,6 +1254,9 @@ mod tests {
                 timeout: 600,
                 matcher: None,
                 commands: Vec::new(),
+            async_execution: false,
+            once: false,
+            status_message: None,
             }],
             ..Default::default()
         };
@@ -1083,5 +1279,49 @@ mod tests {
             global.pre_tool_use[2].command,
             Some(CommandSpec::Argv(vec!["./local-hook.sh".to_string()]))
         );
+    }
+
+    #[test]
+    fn test_once_and_status_message_deserialize() {
+        let toml_str = r#"
+            [[pre_tool_use]]
+            command = ["./check.sh"]
+            once = true
+            status_message = "Checking permissions..."
+        "#;
+        let config: HooksConfigToml = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.pre_tool_use.len(), 1);
+        assert!(config.pre_tool_use[0].once);
+        assert_eq!(
+            config.pre_tool_use[0].status_message,
+            Some("Checking permissions...".to_string())
+        );
+    }
+
+    #[test]
+    fn test_once_and_status_message_in_grouped_format() {
+        let toml_str = r#"
+            [[pre_tool_use]]
+            matcher = "^Bash$"
+
+            [[pre_tool_use.commands]]
+            command = ["./hook1.sh"]
+            once = true
+            status_message = "Running security check..."
+
+            [[pre_tool_use.commands]]
+            command = ["./hook2.sh"]
+            once = false
+        "#;
+        let config: HooksConfigToml = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.pre_tool_use.len(), 1);
+        assert_eq!(config.pre_tool_use[0].commands.len(), 2);
+        assert!(config.pre_tool_use[0].commands[0].once);
+        assert_eq!(
+            config.pre_tool_use[0].commands[0].status_message,
+            Some("Running security check...".to_string())
+        );
+        assert!(!config.pre_tool_use[0].commands[1].once);
+        assert_eq!(config.pre_tool_use[0].commands[1].status_message, None);
     }
 }

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,6 +18,31 @@ const MAX_STDOUT_BYTES: usize = 1_048_576; // 1MB
 
 /// Maximum bytes to read from a hook command's stderr to prevent unbounded memory usage.
 const MAX_STDERR_BYTES: usize = 1_048_576; // 1MB
+
+/// Parse environment file written by SessionStart hooks.
+/// Format: KEY=VALUE lines (one per line).
+/// - Empty lines and lines starting with # are ignored
+/// - First = splits key and value
+/// - Returns empty HashMap if file doesn't exist or can't be read
+fn parse_env_file(path: &std::path::Path) -> HashMap<String, String> {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return HashMap::new();
+    };
+
+    content
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            // Skip empty lines and comments
+            if line.is_empty() || line.starts_with('#') {
+                return None;
+            }
+            // Split on first = only
+            let (key, value) = line.split_once('=')?;
+            Some((key.trim().to_string(), value.trim().to_string()))
+        })
+        .collect()
+}
 
 /// Decision returned by a hook command (Claude Code compatible).
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -111,7 +137,11 @@ impl From<HookCommandOutput> for HookResult {
                 }
             },
         };
-        Self { outcome, meta }
+        Self {
+            outcome,
+            meta,
+            env_vars: HashMap::new(),
+        }
     }
 }
 
@@ -130,6 +160,9 @@ impl From<HookCommandOutput> for HookResult {
 /// - Spawn failure → log warning and return `HookOutcome::Proceed` (fail-open)
 pub(super) fn command_hook(command: super::config::CommandSpec, timeout: Duration) -> Hook {
     Hook {
+        is_async: false,
+        once: false,
+        status_message: None,
         func: Arc::new(move |payload: &HookPayload| {
             let command_spec = command.clone();
             let payload = payload.clone();
@@ -138,6 +171,29 @@ pub(super) fn command_hook(command: super::config::CommandSpec, timeout: Duratio
                     tracing::warn!("hook command is empty, skipping");
                     return HookOutcome::Proceed.into();
                 };
+
+                // Log command summary (truncate to 50 chars for brevity)
+                let cmd_summary = match &command_spec {
+                    super::config::CommandSpec::Shell(s) => {
+                        if s.len() > 50 {
+                            format!("{}...", &s[..50])
+                        } else {
+                            s.clone()
+                        }
+                    }
+                    super::config::CommandSpec::Argv(argv) => {
+                        if let Some(first) = argv.first() {
+                            if first.len() > 50 {
+                                format!("{}...", &first[..50])
+                            } else {
+                                first.clone()
+                            }
+                        } else {
+                            String::new()
+                        }
+                    }
+                };
+                tracing::debug!(command = %cmd_summary, "Starting hook execution");
 
                 // Set up working directory, stdio, and environment variables
                 // that Claude Code hooks expect.
@@ -151,6 +207,11 @@ pub(super) fn command_hook(command: super::config::CommandSpec, timeout: Duratio
                     .env("CODEX_PROJECT_DIR", &cwd_str)
                     .env("CLAUDE_SESSION_ID", payload.session_id.to_string())
                     .env("CODEX_SESSION_ID", payload.session_id.to_string());
+
+                // Set CLAUDE_ENV_FILE for SessionStart hooks
+                if let Some(ref env_file_path) = payload.env_file_path {
+                    command.env("CLAUDE_ENV_FILE", env_file_path);
+                }
 
                 let mut child = match command.spawn() {
                     Ok(child) => child,
@@ -298,6 +359,15 @@ pub(super) fn command_hook(command: super::config::CommandSpec, timeout: Duratio
                     }
                 };
 
+                // Log hook completion
+                let exit_code = status.code().unwrap_or(-1);
+                tracing::debug!(
+                    exit_code = exit_code,
+                    stdout_len = stdout_bytes.len(),
+                    stderr_len = stderr_string.len(),
+                    "Hook command completed"
+                );
+
                 // Exit code semantics (Claude Code compatible):
                 //   exit 0  → parse stdout JSON (below)
                 //   exit 2  → blocking error on blockable events, otherwise warn
@@ -328,28 +398,50 @@ pub(super) fn command_hook(command: super::config::CommandSpec, timeout: Duratio
                 }
 
                 // Exit code 0: parse stdout or default to Proceed
-                if stdout_bytes.is_empty() {
-                    return HookOutcome::Proceed.into();
-                }
-
-                // If stdout was truncated, the JSON is likely corrupted.
-                // Block rather than falling through to Proceed, which would
-                // silently bypass the hook's intended decision.
-                if stdout_capped {
-                    return HookOutcome::Block {
+                let mut result = if stdout_bytes.is_empty() {
+                    tracing::debug!("Hook returned empty stdout, treating as Proceed");
+                    HookResult::from(HookOutcome::Proceed)
+                } else if stdout_capped {
+                    // If stdout was truncated, the JSON is likely corrupted.
+                    // Block rather than falling through to Proceed, which would
+                    // silently bypass the hook's intended decision.
+                    HookResult::from(HookOutcome::Block {
                         message: Some(
                             "hook stdout exceeded size limit; output truncated and cannot be trusted".to_string(),
                         ),
-                    }.into();
-                }
+                    })
+                } else {
+                    match serde_json::from_slice::<HookCommandOutput>(&stdout_bytes) {
+                        Ok(output) => {
+                            tracing::debug!(decision = ?output.decision, "Parsed hook JSON output");
+                            output.into()
+                        }
+                        Err(err) => {
+                            let stdout_preview = String::from_utf8_lossy(&stdout_bytes);
+                            let truncated = if stdout_preview.len() > 200 {
+                                format!("{}...", &stdout_preview[..200])
+                            } else {
+                                stdout_preview.to_string()
+                            };
+                            tracing::warn!(
+                                error = %err,
+                                stdout = %truncated,
+                                "Failed to parse hook command JSON output, treating as Proceed"
+                            );
+                            HookResult::from(HookOutcome::Proceed)
+                        }
+                    }
+                };
 
-                match serde_json::from_slice::<HookCommandOutput>(&stdout_bytes) {
-                    Ok(output) => output.into(),
-                    Err(err) => {
-                        tracing::warn!("failed to parse hook command output: {err}");
-                        HookOutcome::Proceed.into()
+                // Read environment variables from CLAUDE_ENV_FILE if it was set
+                if let Some(ref env_file_path) = payload.env_file_path {
+                    result.env_vars = parse_env_file(env_file_path);
+                    if !result.env_vars.is_empty() {
+                        tracing::debug!(env_var_count = result.env_vars.len(), "Parsed env vars from CLAUDE_ENV_FILE");
                     }
                 }
+
+                result
             })
         }),
     }
@@ -516,6 +608,7 @@ mod tests {
                 transcript_path: None,
                 permission_mode: "on-request".to_string(),
                 hook_event,
+                env_file_path: None,
             }
         }
 
@@ -538,6 +631,7 @@ mod tests {
                 transcript_path: None,
                 permission_mode: "on-request".to_string(),
                 hook_event,
+                env_file_path: None,
             }
         }
 
@@ -716,6 +810,49 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn command_hook_receives_claude_env_file_for_session_start() {
+            use super::super::super::types::HookEventSessionStart;
+
+            // Create a SessionStart payload with env_file_path set
+            let temp_file = tempfile::NamedTempFile::new().expect("create temp file");
+            let env_file_path = temp_file.path().to_path_buf();
+
+            let hook_event = HookEvent::SessionStart {
+                event: HookEventSessionStart {
+                    source: "cli".to_string(),
+                    model: "claude-opus-4-6".to_string(),
+                    agent_type: "codex".to_string(),
+                },
+            };
+            let payload = HookPayload {
+                session_id: ThreadId::new(),
+                cwd: PathBuf::from("/tmp"),
+                triggered_at: Utc
+                    .with_ymd_and_hms(2025, 1, 1, 0, 0, 0)
+                    .single()
+                    .expect("valid timestamp"),
+                hook_event_name: hook_event.hook_event_name().to_string(),
+                transcript_path: None,
+                permission_mode: "on-request".to_string(),
+                hook_event,
+                env_file_path: Some(env_file_path.clone()),
+            };
+
+            // Hook writes KEY=VALUE to CLAUDE_ENV_FILE and returns proceed
+            let hook = command_hook(
+                shell(r#"echo "TEST_VAR=test_value" >> "$CLAUDE_ENV_FILE"; echo '{"decision":"proceed"}'"#),
+                Duration::from_secs(5),
+            );
+
+            let result = hook.execute(&payload).await;
+            assert_eq!(result.outcome, HookOutcome::Proceed);
+
+            // Verify env_vars were parsed from the file
+            assert_eq!(result.env_vars.len(), 1);
+            assert_eq!(result.env_vars.get("TEST_VAR"), Some(&"test_value".to_string()));
+        }
+
+        #[tokio::test]
         async fn command_hook_runs_in_payload_cwd() {
             // Verify that the hook command runs in the payload's cwd directory
             // by having the script print its working directory via `pwd`.
@@ -750,6 +887,58 @@ mod tests {
                 other => panic!("expected Block with cwd message, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn test_parse_env_file() {
+        use std::io::Write;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let env_file_path = temp_dir.path().join("env.txt");
+
+        // Test with valid KEY=VALUE pairs
+        {
+            let mut file = std::fs::File::create(&env_file_path).unwrap();
+            writeln!(file, "FOO=bar").unwrap();
+            writeln!(file, "BAZ=qux").unwrap();
+            writeln!(file, "# Comment line").unwrap();
+            writeln!(file).unwrap();
+            writeln!(file, "KEY_WITH_SPACES = value with spaces ").unwrap();
+        }
+
+        let env_vars = super::parse_env_file(&env_file_path);
+        assert_eq!(env_vars.len(), 3);
+        assert_eq!(env_vars.get("FOO"), Some(&"bar".to_string()));
+        assert_eq!(env_vars.get("BAZ"), Some(&"qux".to_string()));
+        assert_eq!(env_vars.get("KEY_WITH_SPACES"), Some(&"value with spaces".to_string()));
+
+        // Test with empty file
+        std::fs::write(&env_file_path, "").unwrap();
+        let env_vars = super::parse_env_file(&env_file_path);
+        assert_eq!(env_vars.len(), 0);
+
+        // Test with non-existent file
+        let env_vars = super::parse_env_file(&temp_dir.path().join("nonexistent.txt"));
+        assert_eq!(env_vars.len(), 0);
+
+        // Test with malformed lines (no = sign)
+        {
+            let mut file = std::fs::File::create(&env_file_path).unwrap();
+            writeln!(file, "INVALID_LINE").unwrap();
+            writeln!(file, "VALID=value").unwrap();
+        }
+        let env_vars = super::parse_env_file(&env_file_path);
+        assert_eq!(env_vars.len(), 1);
+        assert_eq!(env_vars.get("VALID"), Some(&"value".to_string()));
+
+        // Test with value containing = sign
+        {
+            let mut file = std::fs::File::create(&env_file_path).unwrap();
+            writeln!(file, "URL=https://example.com?foo=bar").unwrap();
+        }
+        let env_vars = super::parse_env_file(&env_file_path);
+        assert_eq!(env_vars.len(), 1);
+        assert_eq!(env_vars.get("URL"), Some(&"https://example.com?foo=bar".to_string()));
     }
 
     #[test]

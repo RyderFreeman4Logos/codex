@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -16,12 +17,20 @@ pub(crate) type HookFn =
 #[derive(Clone)]
 pub(crate) struct Hook {
     pub(crate) func: HookFn,
+    pub(crate) is_async: bool,
+    /// When true, this hook only fires once per session.
+    pub(crate) once: bool,
+    /// Optional status message for UI display during execution.
+    pub(crate) status_message: Option<String>,
 }
 
 impl Default for Hook {
     fn default() -> Self {
         Self {
             func: Arc::new(|_| Box::pin(async { HookResult::default() })),
+            is_async: false,
+            once: false,
+            status_message: None,
         }
     }
 }
@@ -48,6 +57,9 @@ pub(crate) struct HookPayload {
     pub(crate) permission_mode: String,
     #[serde(flatten)]
     pub(crate) hook_event: HookEvent,
+    /// Path to env file for SessionStart hooks to write KEY=VALUE pairs.
+    #[serde(skip)]
+    pub(crate) env_file_path: Option<PathBuf>,
 }
 
 impl HookPayload {
@@ -66,6 +78,7 @@ impl HookPayload {
             transcript_path,
             permission_mode,
             hook_event,
+            env_file_path: None,
         }
     }
 }
@@ -331,6 +344,8 @@ pub(crate) struct HookOutputMeta {
 pub(crate) struct HookResult {
     pub outcome: HookOutcome,
     pub meta: HookOutputMeta,
+    /// Environment variables set by the hook via CLAUDE_ENV_FILE.
+    pub env_vars: HashMap<String, String>,
 }
 
 impl Default for HookResult {
@@ -338,6 +353,7 @@ impl Default for HookResult {
         Self {
             outcome: HookOutcome::Proceed,
             meta: HookOutputMeta::default(),
+            env_vars: HashMap::new(),
         }
     }
 }
@@ -347,6 +363,7 @@ impl From<HookOutcome> for HookResult {
         Self {
             outcome,
             meta: HookOutputMeta::default(),
+            env_vars: HashMap::new(),
         }
     }
 }
@@ -386,6 +403,10 @@ pub(crate) struct HookAggregateEffect {
     pub suppress_output: bool,
     /// Override stop reason for Stop events (last writer wins).
     pub stop_reason: Option<String>,
+    /// Status messages collected from hooks that provide them.
+    pub status_messages: Vec<String>,
+    /// Accumulated environment variables from all hooks (later hooks override earlier ones for same key).
+    pub env_vars: HashMap<String, String>,
 }
 
 impl Default for HookAggregateEffect {
@@ -397,6 +418,8 @@ impl Default for HookAggregateEffect {
             modified_content: None,
             suppress_output: false,
             stop_reason: None,
+            status_messages: Vec::new(),
+            env_vars: HashMap::new(),
         }
     }
 }
@@ -451,6 +474,7 @@ mod tests {
             transcript_path: None,
             permission_mode: "on-request".to_string(),
             hook_event,
+            env_file_path: None,
         };
 
         let actual = serde_json::to_value(payload).expect("serialize hook payload");
@@ -490,6 +514,7 @@ mod tests {
             transcript_path: Some(PathBuf::from("/tmp/transcript.jsonl")),
             permission_mode: "never".to_string(),
             hook_event,
+            env_file_path: None,
         };
 
         let actual = serde_json::to_value(payload).expect("serialize");

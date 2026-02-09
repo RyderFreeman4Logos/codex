@@ -327,6 +327,9 @@ mod tests {
                 timeout: 600,
                 matcher: Some("^Bash$".to_string()),
                 commands: Vec::new(),
+                async_execution: false,
+            once: false,
+            status_message: None,
             }],
             ..Default::default()
         };
@@ -350,12 +353,18 @@ mod tests {
                 timeout: 600,
                 matcher: Some("^Read$".to_string()),
                 commands: Vec::new(),
+                async_execution: false,
+            once: false,
+            status_message: None,
             }],
             post_tool_use: vec![MatcherGroupToml {
                 command: Some(CommandSpec::Argv(vec!["./post-hook.sh".to_string()])),
                 timeout: 600,
                 matcher: None,
                 commands: Vec::new(),
+                async_execution: false,
+            once: false,
+            status_message: None,
             }],
             ..Default::default()
         };
@@ -421,6 +430,9 @@ mod tests {
                 timeout: 600,
                 matcher: None,
                 commands: Vec::new(),
+                async_execution: false,
+            once: false,
+            status_message: None,
             }],
             ..Default::default()
         };
@@ -508,6 +520,9 @@ mod tests {
                 timeout: 600,
                 matcher: None,
                 commands: Vec::new(),
+                async_execution: false,
+            once: false,
+            status_message: None,
             }],
             ..Default::default()
         };
@@ -530,6 +545,9 @@ mod tests {
                 timeout: 600,
                 matcher: None,
                 commands: Vec::new(),
+                async_execution: false,
+            once: false,
+            status_message: None,
             }],
             ..Default::default()
         };
@@ -552,6 +570,9 @@ mod tests {
                 timeout: 600,
                 matcher: None,
                 commands: Vec::new(),
+                async_execution: false,
+            once: false,
+            status_message: None,
             }],
             ..Default::default()
         };
