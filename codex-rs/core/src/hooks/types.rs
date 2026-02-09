@@ -103,6 +103,8 @@ pub(crate) struct HookEventPreToolUse {
 #[serde(rename_all = "snake_case")]
 pub(crate) struct HookEventPostToolUse {
     pub tool_name: String,
+    /// The tool input/arguments as JSON (included for context in post-execution hooks).
+    pub tool_input: JsonValue,
     /// Called `tool_response` in Claude Code wire protocol (was `tool_output`).
     #[serde(rename = "tool_response")]
     pub tool_output: String,
@@ -551,6 +553,7 @@ mod tests {
         let hook_event = HookEvent::PostToolUse {
             event: HookEventPostToolUse {
                 tool_name: "bash".to_string(),
+                tool_input: json!({"command": "ls"}),
                 tool_output: "file1.txt\nfile2.txt".to_string(),
             },
         };
@@ -559,6 +562,7 @@ mod tests {
         let expected = json!({
             "event_type": "PostToolUse",
             "tool_name": "bash",
+            "tool_input": {"command": "ls"},
             "tool_response": "file1.txt\nfile2.txt",
         });
 
@@ -688,5 +692,486 @@ mod tests {
         });
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn hook_event_subagent_start_serializes_correctly() {
+        use super::HookEventSubagentStart;
+
+        let hook_event = HookEvent::SubagentStart {
+            event: HookEventSubagentStart {
+                agent_type: "rust-developer".to_string(),
+                task: "Implement authentication module".to_string(),
+            },
+        };
+
+        let actual = serde_json::to_value(&hook_event).expect("serialize subagent_start event");
+        let expected = json!({
+            "event_type": "SubagentStart",
+            "agent_type": "rust-developer",
+            "task": "Implement authentication module",
+        });
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn hook_event_subagent_stop_serializes_correctly() {
+        use super::HookEventSubagentStop;
+
+        let hook_event = HookEvent::SubagentStop {
+            event: HookEventSubagentStop {
+                agent_type: "rust-developer".to_string(),
+                reason: "task_completed".to_string(),
+            },
+        };
+
+        let actual = serde_json::to_value(&hook_event).expect("serialize subagent_stop event");
+        let expected = json!({
+            "event_type": "SubagentStop",
+            "agent_type": "rust-developer",
+            "reason": "task_completed",
+        });
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn hook_event_pre_compact_serializes_correctly() {
+        use super::HookEventPreCompact;
+
+        let hook_event = HookEvent::PreCompact {
+            event: HookEventPreCompact {
+                trigger: "context_limit".to_string(),
+            },
+        };
+
+        let actual = serde_json::to_value(&hook_event).expect("serialize pre_compact event");
+        let expected = json!({
+            "event_type": "PreCompact",
+            "trigger": "context_limit",
+        });
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn hook_event_task_completed_serializes_correctly() {
+        use super::HookEventTaskCompleted;
+
+        let hook_event = HookEvent::TaskCompleted {
+            event: HookEventTaskCompleted {
+                summary: "Successfully implemented user authentication".to_string(),
+            },
+        };
+
+        let actual = serde_json::to_value(&hook_event).expect("serialize task_completed event");
+        let expected = json!({
+            "event_type": "TaskCompleted",
+            "summary": "Successfully implemented user authentication",
+        });
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn hook_event_session_end_serializes_correctly() {
+        use super::HookEventSessionEnd;
+
+        let hook_event = HookEvent::SessionEnd {
+            event: HookEventSessionEnd {
+                reason: "user_exit".to_string(),
+            },
+        };
+
+        let actual = serde_json::to_value(&hook_event).expect("serialize session_end event");
+        let expected = json!({
+            "event_type": "SessionEnd",
+            "reason": "user_exit",
+        });
+
+        assert_eq!(actual, expected);
+    }
+}
+
+/// End-to-end protocol compatibility tests for Claude Code wire format.
+///
+/// These tests verify that the JSON payload sent to hook commands via stdin
+/// matches the Claude Code specification exactly. Each test checks:
+/// 1. Required public fields (session_id, cwd, triggered_at, etc.)
+/// 2. Event-specific fields with correct names and types
+/// 3. No legacy nested structures (hook_event, event_type at wrong level)
+/// 4. Correct camelCase/snake_case formatting per field
+#[cfg(test)]
+mod protocol_compat_tests {
+    use super::*;
+    use serde_json::{json, Value};
+
+    fn create_test_payload(hook_event: HookEvent) -> HookPayload {
+        HookPayload {
+            session_id: ThreadId::new(),
+            cwd: PathBuf::from("/tmp/test-project"),
+            triggered_at: Utc::now(),
+            hook_event_name: hook_event.hook_event_name().to_string(),
+            transcript_path: Some(PathBuf::from("/tmp/transcript.jsonl")),
+            permission_mode: "on-request".to_string(),
+            hook_event,
+            env_file_path: None,
+        }
+    }
+
+    fn verify_common_fields(json: &Value, event_name: &str) {
+        // Required public fields
+        assert!(
+            json["session_id"].is_string(),
+            "session_id should be string"
+        );
+        assert!(json["cwd"].is_string(), "cwd should be string");
+        assert!(
+            json["triggered_at"].is_string(),
+            "triggered_at should be string"
+        );
+        assert_eq!(
+            json["hook_event_name"], event_name,
+            "hook_event_name mismatch"
+        );
+        assert_eq!(
+            json["permission_mode"], "on-request",
+            "permission_mode mismatch"
+        );
+        assert!(
+            json["transcript_path"].is_string(),
+            "transcript_path should be string"
+        );
+
+        // Legacy nested keys should NOT exist
+        assert!(
+            json.get("hook_event").is_none(),
+            "legacy 'hook_event' nesting detected"
+        );
+
+        // event_type should exist and match hook_event_name
+        assert_eq!(
+            json["event_type"], event_name,
+            "event_type should match hook_event_name"
+        );
+    }
+
+    #[test]
+    fn after_agent_wire_format() {
+        let thread_id = ThreadId::new();
+        let payload = create_test_payload(HookEvent::AfterAgent {
+            event: HookEventAfterAgent {
+                thread_id,
+                turn_id: "turn-123".to_string(),
+                input_messages: vec!["user input".to_string()],
+                last_assistant_message: Some("assistant response".to_string()),
+            },
+        });
+
+        let json: Value = serde_json::to_value(&payload).unwrap();
+        verify_common_fields(&json, "AfterAgent");
+
+        // Event-specific fields
+        assert_eq!(json["thread_id"], thread_id.to_string());
+        assert_eq!(json["turn_id"], "turn-123");
+        assert!(json["input_messages"].is_array());
+        assert_eq!(json["input_messages"][0], "user input");
+        assert_eq!(json["last_assistant_message"], "assistant response");
+    }
+
+    #[test]
+    fn pre_tool_use_wire_format() {
+        let payload = create_test_payload(HookEvent::PreToolUse {
+            event: HookEventPreToolUse {
+                tool_name: "Bash".to_string(),
+                tool_input: json!({"command": "ls -la", "timeout": 30}),
+            },
+        });
+
+        let json: Value = serde_json::to_value(&payload).unwrap();
+        verify_common_fields(&json, "PreToolUse");
+
+        // Event-specific fields
+        assert_eq!(json["tool_name"], "Bash");
+        assert!(
+            json["tool_input"].is_object(),
+            "tool_input should be JSON object, not string"
+        );
+        assert_eq!(json["tool_input"]["command"], "ls -la");
+        assert_eq!(json["tool_input"]["timeout"], 30);
+    }
+
+    #[test]
+    fn post_tool_use_wire_format() {
+        let payload = create_test_payload(HookEvent::PostToolUse {
+            event: HookEventPostToolUse {
+                tool_name: "Bash".to_string(),
+                tool_input: json!({"command": "echo hello"}),
+                tool_output: "hello\n".to_string(),
+            },
+        });
+
+        let json: Value = serde_json::to_value(&payload).unwrap();
+        verify_common_fields(&json, "PostToolUse");
+
+        // Event-specific fields
+        assert_eq!(json["tool_name"], "Bash");
+        assert!(
+            json["tool_input"].is_object(),
+            "tool_input should be JSON object"
+        );
+        assert_eq!(json["tool_input"]["command"], "echo hello");
+        // Note: wire format uses "tool_response" not "tool_output"
+        assert!(json.get("tool_output").is_none(), "should use tool_response");
+        assert_eq!(json["tool_response"], "hello\n");
+    }
+
+    #[test]
+    fn post_tool_use_failure_wire_format() {
+        let payload = create_test_payload(HookEvent::PostToolUseFailure {
+            event: HookEventPostToolUseFailure {
+                tool_name: "Bash".to_string(),
+                error: "Command not found: nonexistent".to_string(),
+            },
+        });
+
+        let json: Value = serde_json::to_value(&payload).unwrap();
+        verify_common_fields(&json, "PostToolUseFailure");
+
+        assert_eq!(json["tool_name"], "Bash");
+        assert_eq!(json["error"], "Command not found: nonexistent");
+    }
+
+    #[test]
+    fn session_start_wire_format() {
+        let payload = create_test_payload(HookEvent::SessionStart {
+            event: HookEventSessionStart {
+                source: "cli".to_string(),
+                model: "claude-opus-4-6".to_string(),
+                agent_type: "codex".to_string(),
+            },
+        });
+
+        let json: Value = serde_json::to_value(&payload).unwrap();
+        verify_common_fields(&json, "SessionStart");
+
+        assert_eq!(json["source"], "cli");
+        assert_eq!(json["model"], "claude-opus-4-6");
+        assert_eq!(json["agent_type"], "codex");
+    }
+
+    #[test]
+    fn session_end_wire_format() {
+        let payload = create_test_payload(HookEvent::SessionEnd {
+            event: HookEventSessionEnd {
+                reason: "max_turns".to_string(),
+            },
+        });
+
+        let json: Value = serde_json::to_value(&payload).unwrap();
+        verify_common_fields(&json, "SessionEnd");
+
+        assert_eq!(json["reason"], "max_turns");
+    }
+
+    #[test]
+    fn user_prompt_submit_wire_format() {
+        let payload = create_test_payload(HookEvent::UserPromptSubmit {
+            event: HookEventUserPromptSubmit {
+                user_message: "Fix the authentication bug".to_string(),
+            },
+        });
+
+        let json: Value = serde_json::to_value(&payload).unwrap();
+        verify_common_fields(&json, "UserPromptSubmit");
+
+        // Wire format uses "prompt" not "user_message"
+        assert!(
+            json.get("user_message").is_none(),
+            "should use prompt field"
+        );
+        assert_eq!(json["prompt"], "Fix the authentication bug");
+    }
+
+    #[test]
+    fn stop_wire_format() {
+        let payload = create_test_payload(HookEvent::Stop {
+            event: HookEventStop {
+                reason: "user_cancelled".to_string(),
+            },
+        });
+
+        let json: Value = serde_json::to_value(&payload).unwrap();
+        verify_common_fields(&json, "Stop");
+
+        assert_eq!(json["reason"], "user_cancelled");
+    }
+
+    #[test]
+    fn permission_request_wire_format() {
+        let payload = create_test_payload(HookEvent::PermissionRequest {
+            event: HookEventPermissionRequest {
+                tool_name: "Edit".to_string(),
+                tool_input: json!({
+                    "file_path": "/tmp/config.toml",
+                    "old_string": "port = 8080",
+                    "new_string": "port = 8081"
+                }),
+            },
+        });
+
+        let json: Value = serde_json::to_value(&payload).unwrap();
+        verify_common_fields(&json, "PermissionRequest");
+
+        assert_eq!(json["tool_name"], "Edit");
+        assert!(json["tool_input"].is_object());
+        assert_eq!(json["tool_input"]["file_path"], "/tmp/config.toml");
+    }
+
+    #[test]
+    fn notification_wire_format() {
+        let payload = create_test_payload(HookEvent::Notification {
+            event: HookEventNotification {
+                message: "Build completed successfully".to_string(),
+                level: "info".to_string(),
+            },
+        });
+
+        let json: Value = serde_json::to_value(&payload).unwrap();
+        verify_common_fields(&json, "Notification");
+
+        assert_eq!(json["message"], "Build completed successfully");
+        assert_eq!(json["level"], "info");
+    }
+
+    #[test]
+    fn subagent_start_wire_format() {
+        let payload = create_test_payload(HookEvent::SubagentStart {
+            event: HookEventSubagentStart {
+                agent_type: "rust-developer".to_string(),
+                task: "Implement user authentication".to_string(),
+            },
+        });
+
+        let json: Value = serde_json::to_value(&payload).unwrap();
+        verify_common_fields(&json, "SubagentStart");
+
+        assert_eq!(json["agent_type"], "rust-developer");
+        assert_eq!(json["task"], "Implement user authentication");
+    }
+
+    #[test]
+    fn subagent_stop_wire_format() {
+        let payload = create_test_payload(HookEvent::SubagentStop {
+            event: HookEventSubagentStop {
+                agent_type: "rust-developer".to_string(),
+                reason: "task_completed".to_string(),
+            },
+        });
+
+        let json: Value = serde_json::to_value(&payload).unwrap();
+        verify_common_fields(&json, "SubagentStop");
+
+        assert_eq!(json["agent_type"], "rust-developer");
+        assert_eq!(json["reason"], "task_completed");
+    }
+
+    #[test]
+    fn pre_compact_wire_format() {
+        let payload = create_test_payload(HookEvent::PreCompact {
+            event: HookEventPreCompact {
+                trigger: "auto".to_string(),
+            },
+        });
+
+        let json: Value = serde_json::to_value(&payload).unwrap();
+        verify_common_fields(&json, "PreCompact");
+
+        assert_eq!(json["trigger"], "auto");
+    }
+
+    #[test]
+    fn task_completed_wire_format() {
+        let payload = create_test_payload(HookEvent::TaskCompleted {
+            event: HookEventTaskCompleted {
+                summary: "Implemented OAuth2 authentication".to_string(),
+            },
+        });
+
+        let json: Value = serde_json::to_value(&payload).unwrap();
+        verify_common_fields(&json, "TaskCompleted");
+
+        assert_eq!(json["summary"], "Implemented OAuth2 authentication");
+    }
+
+    #[test]
+    fn blockable_events_correctly_identified() {
+        // Blockable events (exit 2 → Block)
+        assert!(HookEvent::PreToolUse {
+            event: HookEventPreToolUse {
+                tool_name: "test".to_string(),
+                tool_input: json!({}),
+            }
+        }
+        .is_blockable());
+
+        assert!(HookEvent::UserPromptSubmit {
+            event: HookEventUserPromptSubmit {
+                user_message: "test".to_string(),
+            }
+        }
+        .is_blockable());
+
+        assert!(HookEvent::PermissionRequest {
+            event: HookEventPermissionRequest {
+                tool_name: "test".to_string(),
+                tool_input: json!({}),
+            }
+        }
+        .is_blockable());
+
+        assert!(HookEvent::Stop {
+            event: HookEventStop {
+                reason: "test".to_string(),
+            }
+        }
+        .is_blockable());
+
+        // Non-blockable events (exit 2 → Proceed with warning)
+        assert!(!HookEvent::AfterAgent {
+            event: HookEventAfterAgent {
+                thread_id: ThreadId::new(),
+                turn_id: "test".to_string(),
+                input_messages: vec![],
+                last_assistant_message: None,
+            }
+        }
+        .is_blockable());
+
+        assert!(!HookEvent::PostToolUse {
+            event: HookEventPostToolUse {
+                tool_name: "test".to_string(),
+                tool_input: json!({}),
+                tool_output: "output".to_string(),
+            }
+        }
+        .is_blockable());
+
+        assert!(!HookEvent::SessionStart {
+            event: HookEventSessionStart {
+                source: "cli".to_string(),
+                model: "test".to_string(),
+                agent_type: "test".to_string(),
+            }
+        }
+        .is_blockable());
+
+        assert!(!HookEvent::SessionEnd {
+            event: HookEventSessionEnd {
+                reason: "test".to_string(),
+            }
+        }
+        .is_blockable());
     }
 }

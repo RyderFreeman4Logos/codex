@@ -240,6 +240,9 @@ impl ToolRouter {
             }
         }
 
+        // Capture tool input for PostToolUse hook before payload is moved.
+        let tool_input_for_hook = payload.hook_input();
+
         let invocation = ToolInvocation {
             session: Arc::clone(&session),
             turn: Arc::clone(&turn),
@@ -292,6 +295,7 @@ impl ToolRouter {
                     HookEvent::PostToolUse {
                         event: HookEventPostToolUse {
                             tool_name: hook_name,
+                            tool_input: tool_input_for_hook,
                             tool_output,
                         },
                     },

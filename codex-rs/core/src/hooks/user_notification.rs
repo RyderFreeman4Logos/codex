@@ -165,10 +165,12 @@ mod tests {
     #[test]
     fn legacy_notify_json_for_post_tool_use_returns_event_serialized_directly() -> Result<()> {
         use super::super::types::HookEventPostToolUse;
+        use serde_json::json;
 
         let hook_event = HookEvent::PostToolUse {
             event: HookEventPostToolUse {
                 tool_name: "bash".to_string(),
+                tool_input: json!({"command": "ls"}),
                 tool_output: "file1.txt\nfile2.txt".to_string(),
             },
         };
@@ -179,6 +181,7 @@ mod tests {
         let expected = json!({
             "event_type": "PostToolUse",
             "tool_name": "bash",
+            "tool_input": {"command": "ls"},
             "tool_response": "file1.txt\nfile2.txt",
         });
 

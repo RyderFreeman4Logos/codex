@@ -587,10 +587,12 @@ mod tests {
 
     fn hook_payload_post_tool_use(label: &str) -> HookPayload {
         use super::super::types::HookEventPostToolUse;
+        use serde_json::json;
 
         let hook_event = HookEvent::PostToolUse {
             event: HookEventPostToolUse {
                 tool_name: format!("tool-{label}"),
+                tool_input: json!({"test": "input"}),
                 tool_output: "success".to_string(),
             },
         };

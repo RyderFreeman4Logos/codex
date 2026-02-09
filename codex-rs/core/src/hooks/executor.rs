@@ -1019,3 +1019,243 @@ mod tests {
         );
     }
 }
+
+/// Protocol compatibility tests for stdout JSON parsing.
+///
+/// These tests verify that HookCommandOutput correctly deserializes all
+/// supported JSON formats that hooks can return via stdout, following
+/// the Claude Code specification.
+#[cfg(test)]
+mod stdout_protocol_compat_tests {
+    use super::super::types::HookOutcome;
+    use super::super::types::HookResult;
+    use super::HookCommandOutput;
+    use super::HookDecision;
+    use pretty_assertions::assert_eq;
+    use serde_json::json;
+
+    #[test]
+    fn stdout_json_proceed_simple() {
+        let json = json!({"decision": "proceed"});
+        let output: HookCommandOutput = serde_json::from_value(json).unwrap();
+        assert_eq!(output.decision, HookDecision::Proceed);
+        assert_eq!(HookResult::from(output).outcome, HookOutcome::Proceed);
+    }
+
+    #[test]
+    fn stdout_json_block_with_reason() {
+        let json = json!({
+            "decision": "block",
+            "reason": "Sensitive operation not allowed in production"
+        });
+        let output: HookCommandOutput = serde_json::from_value(json).unwrap();
+        assert_eq!(output.decision, HookDecision::Block);
+        assert_eq!(
+            output.reason,
+            Some("Sensitive operation not allowed in production".to_string())
+        );
+
+        match HookResult::from(output).outcome {
+            HookOutcome::Block { message } => {
+                assert_eq!(
+                    message,
+                    Some("Sensitive operation not allowed in production".to_string())
+                );
+            }
+            _ => panic!("expected Block outcome"),
+        }
+    }
+
+    #[test]
+    fn stdout_json_block_legacy_message_alias() {
+        // Legacy hooks may use "message" instead of "reason"
+        let json = json!({
+            "decision": "block",
+            "message": "Denied by policy"
+        });
+        let output: HookCommandOutput = serde_json::from_value(json).unwrap();
+        assert_eq!(output.decision, HookDecision::Block);
+        assert_eq!(output.reason, Some("Denied by policy".to_string()));
+    }
+
+    #[test]
+    fn stdout_json_modify_with_content() {
+        let json = json!({
+            "decision": "modify",
+            "content": "sanitized input"
+        });
+        let output: HookCommandOutput = serde_json::from_value(json).unwrap();
+        assert_eq!(output.decision, HookDecision::Modify);
+        assert_eq!(output.content, Some("sanitized input".to_string()));
+
+        match HookResult::from(output).outcome {
+            HookOutcome::Modify { content } => {
+                assert_eq!(content, "sanitized input");
+            }
+            _ => panic!("expected Modify outcome"),
+        }
+    }
+
+    #[test]
+    fn stdout_json_modify_with_empty_content() {
+        let json = json!({
+            "decision": "modify",
+            "content": ""
+        });
+        let output: HookCommandOutput = serde_json::from_value(json).unwrap();
+        assert_eq!(output.decision, HookDecision::Modify);
+        assert_eq!(output.content, Some(String::new()));
+
+        match HookResult::from(output).outcome {
+            HookOutcome::Modify { content } => {
+                assert_eq!(content, "");
+            }
+            _ => panic!("expected Modify outcome"),
+        }
+    }
+
+    #[test]
+    fn stdout_json_modify_without_content_becomes_block() {
+        let json = json!({"decision": "modify"});
+        let output: HookCommandOutput = serde_json::from_value(json).unwrap();
+        assert_eq!(output.decision, HookDecision::Modify);
+        assert_eq!(output.content, None);
+
+        // Should be converted to Block to prevent empty substitution
+        match HookResult::from(output).outcome {
+            HookOutcome::Block { .. } => {}
+            other => panic!("expected Block outcome for modify without content, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stdout_json_with_metadata_fields() {
+        let json = json!({
+            "decision": "block",
+            "reason": "Not allowed",
+            "systemMessage": "Hook blocked this operation for security reasons",
+            "stopReason": "security_violation",
+            "suppressOutput": true
+        });
+        let output: HookCommandOutput = serde_json::from_value(json).unwrap();
+        assert_eq!(output.decision, HookDecision::Block);
+        assert_eq!(output.reason, Some("Not allowed".to_string()));
+        assert_eq!(
+            output.system_message,
+            Some("Hook blocked this operation for security reasons".to_string())
+        );
+        assert_eq!(output.stop_reason, Some("security_violation".to_string()));
+        assert_eq!(output.suppress_output, Some(true));
+
+        let result = HookResult::from(output);
+        assert_eq!(
+            result.meta.system_message,
+            Some("Hook blocked this operation for security reasons".to_string())
+        );
+        assert_eq!(result.meta.stop_reason, Some("security_violation".to_string()));
+        assert_eq!(result.meta.suppress_output, Some(true));
+    }
+
+    #[test]
+    fn stdout_json_empty_defaults_to_proceed() {
+        // Empty JSON object should default to Proceed
+        let json = json!({});
+        let output: HookCommandOutput = serde_json::from_value(json).unwrap();
+        assert_eq!(output.decision, HookDecision::Proceed);
+        assert_eq!(HookResult::from(output).outcome, HookOutcome::Proceed);
+    }
+
+    #[test]
+    fn stdout_json_camel_case_fields() {
+        // Verify camelCase formatting is correctly parsed
+        let json = json!({
+            "decision": "proceed",
+            "systemMessage": "Operation approved",
+            "stopReason": "max_turns",
+            "suppressOutput": false,
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow",
+                "permissionDecisionReason": "Safe operation",
+                "updatedInput": {"modified": true},
+                "additionalContext": "Verified by security scan"
+            }
+        });
+        let output: HookCommandOutput = serde_json::from_value(json).unwrap();
+        assert_eq!(output.decision, HookDecision::Proceed);
+        assert_eq!(output.system_message, Some("Operation approved".to_string()));
+        assert_eq!(output.stop_reason, Some("max_turns".to_string()));
+        assert_eq!(output.suppress_output, Some(false));
+
+        let specific = output
+            .hook_specific_output
+            .expect("should have hook specific output");
+        assert_eq!(specific.hook_event_name, Some("PreToolUse".to_string()));
+        assert_eq!(specific.permission_decision, Some("allow".to_string()));
+        assert_eq!(
+            specific.permission_decision_reason,
+            Some("Safe operation".to_string())
+        );
+        assert!(specific.updated_input.is_some());
+        assert_eq!(
+            specific.additional_context,
+            Some("Verified by security scan".to_string())
+        );
+    }
+
+    #[test]
+    fn stdout_json_all_decision_types() {
+        // Verify all three decision types are correctly parsed
+        for (decision_str, expected_decision) in [
+            ("proceed", HookDecision::Proceed),
+            ("block", HookDecision::Block),
+            ("modify", HookDecision::Modify),
+        ] {
+            let json = json!({"decision": decision_str});
+            let output: HookCommandOutput = serde_json::from_value(json).unwrap();
+            assert_eq!(
+                output.decision, expected_decision,
+                "decision '{}' should parse correctly",
+                decision_str
+            );
+        }
+    }
+
+    #[test]
+    fn stdout_json_block_without_reason() {
+        // Block decision without reason should still be valid
+        let json = json!({"decision": "block"});
+        let output: HookCommandOutput = serde_json::from_value(json).unwrap();
+        assert_eq!(output.decision, HookDecision::Block);
+        assert_eq!(output.reason, None);
+
+        match HookResult::from(output).outcome {
+            HookOutcome::Block { message } => {
+                assert_eq!(message, None);
+            }
+            _ => panic!("expected Block outcome"),
+        }
+    }
+
+    #[test]
+    fn stdout_json_proceed_with_system_message() {
+        // Proceed can include system message for logging/notification
+        let json = json!({
+            "decision": "proceed",
+            "systemMessage": "Operation logged for audit"
+        });
+        let output: HookCommandOutput = serde_json::from_value(json).unwrap();
+        assert_eq!(output.decision, HookDecision::Proceed);
+        assert_eq!(
+            output.system_message,
+            Some("Operation logged for audit".to_string())
+        );
+
+        let result = HookResult::from(output);
+        assert_eq!(result.outcome, HookOutcome::Proceed);
+        assert_eq!(
+            result.meta.system_message,
+            Some("Operation logged for audit".to_string())
+        );
+    }
+}
