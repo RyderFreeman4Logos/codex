@@ -39,12 +39,17 @@ install:
 
 # Build and install codex-cli from source.
 #
-# Pass either a directory or a full destination path:
+# Pass a destination directory (with or without trailing slash). Optionally pass a
+# custom filename:
 #   just install-codex /usr/local/bin
+#   just install-codex /usr/local/bin codex-cli
+#
+# Backwards-compatible: you may also pass an explicit destination path ending in
+# `codex`/`codex.exe`:
 #   just install-codex /usr/local/bin/codex
-install-codex dest="$HOME/.cargo/bin":
+install-codex dest="$HOME/.cargo/bin" name="":
     cargo build --release -p codex-cli
-    set -e; exe_suffix=''; src_bin='target/release/codex'; if [ -f "${src_bin}.exe" ]; then exe_suffix='.exe'; src_bin="${src_bin}.exe"; fi; dest_path="{{dest}}"; base="$(basename "$dest_path")"; case "$dest_path" in */) dest_path="${dest_path}codex${exe_suffix}" ;; *) if [ -d "$dest_path" ]; then dest_path="$dest_path/codex${exe_suffix}"; elif [ "$base" != "codex" ] && [ "$base" != "codex.exe" ]; then dest_path="$dest_path/codex${exe_suffix}"; fi ;; esac; mkdir -p "$(dirname "$dest_path")"; install -m 0755 "$src_bin" "$dest_path"; "$dest_path" --version
+    set -e; exe_suffix=''; src_bin='target/release/codex'; if [ -f "${src_bin}.exe" ]; then exe_suffix='.exe'; src_bin="${src_bin}.exe"; fi; dest_dir="{{dest}}"; name_arg="{{name}}"; if [ -n "$name_arg" ]; then case "$name_arg" in */*|*\\*|'.'|'..'|-*) echo "error: name must be a simple filename" >&2; exit 2 ;; esac; fi; dest_path="$dest_dir"; if [ -n "$name_arg" ]; then dest_path="${dest_dir%/}/$name_arg"; case "$dest_path" in *.[eE][xX][eE]) : ;; *) dest_path="${dest_path}${exe_suffix}" ;; esac; else base="$(basename "$dest_path")"; case "$dest_path" in */) dest_path="${dest_path}codex${exe_suffix}" ;; *) if [ -d "$dest_path" ]; then dest_path="$dest_path/codex${exe_suffix}"; elif [ "$base" != "codex" ] && [ "$base" != "codex.exe" ]; then dest_path="$dest_path/codex${exe_suffix}"; fi ;; esac; fi; mkdir -p -- "$(dirname "$dest_path")"; install -m 0755 -- "$src_bin" "$dest_path"; run_bin="$dest_path"; case "$run_bin" in */*) : ;; *) run_bin="./$run_bin" ;; esac; "$run_bin" --version
 
 # Run `cargo nextest` since it's faster than `cargo test`, though including
 # --no-fail-fast is important to ensure all tests are run.
