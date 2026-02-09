@@ -25,6 +25,14 @@ pub(crate) struct Hooks {
     stop: Vec<Hook>,
     user_prompt_submit: Vec<Hook>,
     notification: Vec<Hook>,
+    session_start: Vec<Hook>,
+    session_end: Vec<Hook>,
+    permission_request: Vec<Hook>,
+    post_tool_use_failure: Vec<Hook>,
+    subagent_start: Vec<Hook>,
+    subagent_stop: Vec<Hook>,
+    pre_compact: Vec<Hook>,
+    task_completed: Vec<Hook>,
     /// Semaphore to limit concurrent hook executions.
     semaphore: Arc<Semaphore>,
 }
@@ -38,6 +46,14 @@ impl Default for Hooks {
             stop: Vec::new(),
             user_prompt_submit: Vec::new(),
             notification: Vec::new(),
+            session_start: Vec::new(),
+            session_end: Vec::new(),
+            permission_request: Vec::new(),
+            post_tool_use_failure: Vec::new(),
+            subagent_start: Vec::new(),
+            subagent_stop: Vec::new(),
+            pre_compact: Vec::new(),
+            task_completed: Vec::new(),
             semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_HOOKS)),
         }
     }
@@ -85,6 +101,46 @@ impl Hooks {
             .iter()
             .map(hook_from_entry)
             .collect();
+        let session_start = hooks_config
+            .session_start
+            .iter()
+            .map(hook_from_entry)
+            .collect();
+        let session_end = hooks_config
+            .session_end
+            .iter()
+            .map(hook_from_entry)
+            .collect();
+        let permission_request = hooks_config
+            .permission_request
+            .iter()
+            .map(hook_from_entry)
+            .collect();
+        let post_tool_use_failure = hooks_config
+            .post_tool_use_failure
+            .iter()
+            .map(hook_from_entry)
+            .collect();
+        let subagent_start = hooks_config
+            .subagent_start
+            .iter()
+            .map(hook_from_entry)
+            .collect();
+        let subagent_stop = hooks_config
+            .subagent_stop
+            .iter()
+            .map(hook_from_entry)
+            .collect();
+        let pre_compact = hooks_config
+            .pre_compact
+            .iter()
+            .map(hook_from_entry)
+            .collect();
+        let task_completed = hooks_config
+            .task_completed
+            .iter()
+            .map(hook_from_entry)
+            .collect();
 
         Self {
             after_agent,
@@ -93,6 +149,14 @@ impl Hooks {
             stop,
             user_prompt_submit,
             notification,
+            session_start,
+            session_end,
+            permission_request,
+            post_tool_use_failure,
+            subagent_start,
+            subagent_stop,
+            pre_compact,
+            task_completed,
             semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_HOOKS)),
         }
     }
@@ -105,6 +169,14 @@ impl Hooks {
             HookEvent::Stop { .. } => &self.stop,
             HookEvent::UserPromptSubmit { .. } => &self.user_prompt_submit,
             HookEvent::Notification { .. } => &self.notification,
+            HookEvent::SessionStart { .. } => &self.session_start,
+            HookEvent::SessionEnd { .. } => &self.session_end,
+            HookEvent::PermissionRequest { .. } => &self.permission_request,
+            HookEvent::PostToolUseFailure { .. } => &self.post_tool_use_failure,
+            HookEvent::SubagentStart { .. } => &self.subagent_start,
+            HookEvent::SubagentStop { .. } => &self.subagent_stop,
+            HookEvent::PreCompact { .. } => &self.pre_compact,
+            HookEvent::TaskCompleted { .. } => &self.task_completed,
         }
     }
 

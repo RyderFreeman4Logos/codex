@@ -69,6 +69,10 @@ async fn run_compact_task_inner(
     turn_context: Arc<TurnContext>,
     input: Vec<UserInput>,
 ) -> CodexResult<()> {
+    // TODO(hooks): dispatch HookEvent::PreCompact before starting compaction.
+    // Determine trigger type: "auto", "user", or "context_limit".
+    // This is non-blockable - dispatch and continue regardless of outcome.
+
     let compaction_item = TurnItem::ContextCompaction(ContextCompactionItem::new());
     sess.emit_turn_item_started(&turn_context, &compaction_item)
         .await;

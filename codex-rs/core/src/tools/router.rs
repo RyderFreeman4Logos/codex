@@ -4,6 +4,7 @@ use crate::codex::TurnContext;
 use crate::function_tool::FunctionCallError;
 use crate::hooks::HookEvent;
 use crate::hooks::HookEventPostToolUse;
+use crate::hooks::HookEventPostToolUseFailure;
 use crate::hooks::HookEventPreToolUse;
 use crate::hooks::EffectAction;
 use crate::hooks::HookPayload;
@@ -251,11 +252,30 @@ impl ToolRouter {
         let result = match self.registry.dispatch(invocation).await {
             Ok(response) => Ok(response),
             Err(FunctionCallError::Fatal(message)) => Err(FunctionCallError::Fatal(message)),
-            Err(err) => Ok(Self::failure_response(
-                failure_call_id,
-                payload_outputs_custom,
-                err,
-            )),
+            Err(err) => {
+                // Dispatch PostToolUseFailure hook (non-blockable).
+                session
+                    .hooks()
+                    .dispatch(HookPayload::new(
+                        session.conversation_id,
+                        turn.cwd.clone(),
+                        HookEvent::PostToolUseFailure {
+                            event: HookEventPostToolUseFailure {
+                                tool_name: hook_name.clone(),
+                                error: err.to_string(),
+                            },
+                        },
+                        None,
+                        turn.approval_policy.to_string(),
+                    ))
+                    .await;
+
+                Ok(Self::failure_response(
+                    failure_call_id,
+                    payload_outputs_custom,
+                    err,
+                ))
+            }
         };
 
         // --- PostToolUse hook ---

@@ -61,12 +61,67 @@ pub struct HooksConfigToml {
 
     #[serde(default)]
     pub user_prompt_submit: Vec<HookEntryToml>,
+
+    #[serde(default)]
+    pub session_start: Vec<HookEntryToml>,
+
+    #[serde(default)]
+    pub session_end: Vec<HookEntryToml>,
+
+    #[serde(default)]
+    pub permission_request: Vec<HookEntryToml>,
+
+    #[serde(default)]
+    pub post_tool_use_failure: Vec<HookEntryToml>,
+
+    #[serde(default)]
+    pub subagent_start: Vec<HookEntryToml>,
+
+    #[serde(default)]
+    pub subagent_stop: Vec<HookEntryToml>,
+
+    #[serde(default)]
+    pub pre_compact: Vec<HookEntryToml>,
+
+    #[serde(default)]
+    pub task_completed: Vec<HookEntryToml>,
+}
+
+/// Extract the field that the matcher regex should match against for a given event.
+///
+/// Different event types have different matchable fields:
+/// - PreToolUse/PostToolUse/PostToolUseFailure/PermissionRequest → tool_name
+/// - SessionStart → source
+/// - SessionEnd → reason
+/// - Notification → level (used as notification_type)
+/// - SubagentStart/SubagentStop → agent_type
+/// - PreCompact → trigger
+/// - AfterAgent/UserPromptSubmit/Stop/TaskCompleted → None (matcher not supported)
+fn matcher_field_for_event(event: &super::types::HookEvent) -> Option<&str> {
+    use super::types::HookEvent;
+    match event {
+        HookEvent::PreToolUse { event } => Some(&event.tool_name),
+        HookEvent::PostToolUse { event } => Some(&event.tool_name),
+        HookEvent::PostToolUseFailure { event } => Some(&event.tool_name),
+        HookEvent::PermissionRequest { event } => Some(&event.tool_name),
+        HookEvent::SessionStart { event } => Some(&event.source),
+        HookEvent::SessionEnd { event } => Some(&event.reason),
+        HookEvent::Notification { event } => Some(&event.level),
+        HookEvent::SubagentStart { event } => Some(&event.agent_type),
+        HookEvent::SubagentStop { event } => Some(&event.agent_type),
+        HookEvent::PreCompact { event } => Some(&event.trigger),
+        HookEvent::AfterAgent { .. }
+        | HookEvent::UserPromptSubmit { .. }
+        | HookEvent::Stop { .. }
+        | HookEvent::TaskCompleted { .. } => None,
+    }
 }
 
 /// Convert a single HookEntryToml into a Hook via the command executor.
 ///
 /// If the entry has a matcher pattern, the hook will only execute for events
-/// whose tool name matches the regex pattern. Non-tool events always match.
+/// whose matchable field matches the regex pattern. Events without matchable
+/// fields always execute.
 pub(super) fn hook_from_entry(entry: &HookEntryToml) -> Hook {
     let timeout = Duration::from_secs(entry.timeout);
     let inner = command_hook(entry.command.clone(), timeout);
@@ -81,7 +136,7 @@ pub(super) fn hook_from_entry(entry: &HookEntryToml) -> Hook {
                     tracing::warn!(
                         pattern = %pattern,
                         error = %e,
-                        "Invalid regex pattern in hook matcher, hook will not match any tools"
+                        "Invalid regex pattern in hook matcher, hook will not match any events"
                     );
                     None
                 }
@@ -89,24 +144,17 @@ pub(super) fn hook_from_entry(entry: &HookEntryToml) -> Hook {
 
             Hook {
                 func: Arc::new(move |payload| {
-                    let tool_name = match &payload.hook_event {
-                        super::types::HookEvent::PreToolUse { event } => Some(&event.tool_name),
-                        super::types::HookEvent::PostToolUse { event } => Some(&event.tool_name),
-                        _ => None, // Non-tool events always match
-                    };
+                    let matchable = matcher_field_for_event(&payload.hook_event);
 
-                    if let Some(name) = tool_name {
+                    if let Some(name) = matchable {
                         // If regex compilation failed or doesn't match, skip execution
-                        if regex
-                            .as_ref()
-                            .is_some_and(|re| re.is_match(name.as_str()))
-                        {
+                        if regex.as_ref().is_some_and(|re| re.is_match(name)) {
                             inner.func.clone()(payload)
                         } else {
                             Box::pin(async { super::types::HookResult::default() })
                         }
                     } else {
-                        // Non-tool events always execute
+                        // Events without matchable fields always execute
                         inner.func.clone()(payload)
                     }
                 }),
@@ -182,6 +230,14 @@ mod tests {
         assert!(config.notification.is_empty());
         assert!(config.stop.is_empty());
         assert!(config.user_prompt_submit.is_empty());
+        assert!(config.session_start.is_empty());
+        assert!(config.session_end.is_empty());
+        assert!(config.permission_request.is_empty());
+        assert!(config.post_tool_use_failure.is_empty());
+        assert!(config.subagent_start.is_empty());
+        assert!(config.subagent_stop.is_empty());
+        assert!(config.pre_compact.is_empty());
+        assert!(config.task_completed.is_empty());
     }
 
     #[test]
@@ -368,6 +424,48 @@ mod tests {
         // Invalid regex should not match anything
         assert!(!matches_tool(&entry, "anything"));
         assert!(!matches_tool(&entry, "Bash"));
+    }
+
+    #[test]
+    fn test_hooks_config_deserialize_new_events() {
+        let toml_str = r#"
+            [[session_start]]
+            command = ["./on-start.sh"]
+            matcher = "cli"
+
+            [[session_end]]
+            command = ["./on-end.sh"]
+
+            [[permission_request]]
+            command = ["./on-permission.sh"]
+            matcher = "^Bash$"
+
+            [[post_tool_use_failure]]
+            command = ["./on-failure.sh"]
+
+            [[subagent_start]]
+            command = ["./on-subagent.sh"]
+            matcher = "researcher.*"
+
+            [[subagent_stop]]
+            command = ["./on-subagent-stop.sh"]
+
+            [[pre_compact]]
+            command = ["./on-compact.sh"]
+            matcher = "auto"
+
+            [[task_completed]]
+            command = ["./on-task-done.sh"]
+        "#;
+        let config: HooksConfigToml = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.session_start.len(), 1);
+        assert_eq!(config.session_end.len(), 1);
+        assert_eq!(config.permission_request.len(), 1);
+        assert_eq!(config.post_tool_use_failure.len(), 1);
+        assert_eq!(config.subagent_start.len(), 1);
+        assert_eq!(config.subagent_stop.len(), 1);
+        assert_eq!(config.pre_compact.len(), 1);
+        assert_eq!(config.task_completed.len(), 1);
     }
 
     #[tokio::test]

@@ -73,6 +73,10 @@ impl SessionTask for ReviewTask {
     }
 
     async fn abort(&self, session: Arc<SessionTaskContext>, ctx: Arc<TurnContext>) {
+        // TODO(hooks): dispatch HookEvent::SubagentStop when review sub-agent stops.
+        // agent_type: "review", reason: "aborted".
+        // This is non-blockable - dispatch and continue.
+
         exit_review_mode(session.clone_session(), None, ctx).await;
     }
 }
@@ -83,6 +87,10 @@ async fn start_review_conversation(
     input: Vec<UserInput>,
     cancellation_token: CancellationToken,
 ) -> Option<async_channel::Receiver<Event>> {
+    // TODO(hooks): dispatch HookEvent::SubagentStart when spawning review sub-agent.
+    // agent_type: "review", task: description of review request.
+    // This is non-blockable - dispatch and continue.
+
     let config = ctx.config.clone();
     let mut sub_agent_config = config.as_ref().clone();
     // Carry over review-only feature restrictions so the delegate cannot

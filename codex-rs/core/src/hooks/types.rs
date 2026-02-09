@@ -116,6 +116,74 @@ pub(crate) struct HookEventNotification {
     pub level: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) struct HookEventSessionStart {
+    /// How the session was started (e.g. "cli", "api", "ide").
+    pub source: String,
+    /// Model name used for the session.
+    pub model: String,
+    /// Agent type (e.g. "codex", "claude-code").
+    pub agent_type: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) struct HookEventSessionEnd {
+    /// Reason the session ended (e.g. "user_exit", "max_turns", "error").
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) struct HookEventPermissionRequest {
+    /// Tool name for which permission is requested.
+    pub tool_name: String,
+    /// The tool input/arguments as JSON.
+    pub tool_input: JsonValue,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) struct HookEventPostToolUseFailure {
+    /// Tool name that failed.
+    pub tool_name: String,
+    /// Error message or output from the failed tool.
+    pub error: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) struct HookEventSubagentStart {
+    /// Type of sub-agent being started.
+    pub agent_type: String,
+    /// Task description or identifier.
+    pub task: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) struct HookEventSubagentStop {
+    /// Type of sub-agent being stopped.
+    pub agent_type: String,
+    /// Reason for stopping.
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) struct HookEventPreCompact {
+    /// What triggered the compact (e.g. "auto", "user", "context_limit").
+    pub trigger: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) struct HookEventTaskCompleted {
+    /// Summary of the completed task.
+    pub summary: String,
+}
+
 fn serialize_triggered_at<S>(value: &DateTime<Utc>, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
@@ -153,6 +221,46 @@ pub(crate) enum HookEvent {
         #[serde(flatten)]
         event: HookEventNotification,
     },
+    #[allow(dead_code)] // Integration point requires architectural changes.
+    SessionStart {
+        #[serde(flatten)]
+        event: HookEventSessionStart,
+    },
+    #[allow(dead_code)] // Integration point requires architectural changes.
+    SessionEnd {
+        #[serde(flatten)]
+        event: HookEventSessionEnd,
+    },
+    #[allow(dead_code)] // Integration point requires architectural changes.
+    PermissionRequest {
+        #[serde(flatten)]
+        event: HookEventPermissionRequest,
+    },
+    #[allow(dead_code)] // Integration point requires architectural changes.
+    PostToolUseFailure {
+        #[serde(flatten)]
+        event: HookEventPostToolUseFailure,
+    },
+    #[allow(dead_code)] // Integration point requires architectural changes.
+    SubagentStart {
+        #[serde(flatten)]
+        event: HookEventSubagentStart,
+    },
+    #[allow(dead_code)] // Integration point requires architectural changes.
+    SubagentStop {
+        #[serde(flatten)]
+        event: HookEventSubagentStop,
+    },
+    #[allow(dead_code)] // Integration point requires architectural changes.
+    PreCompact {
+        #[serde(flatten)]
+        event: HookEventPreCompact,
+    },
+    #[allow(dead_code)] // Integration point requires architectural changes.
+    TaskCompleted {
+        #[serde(flatten)]
+        event: HookEventTaskCompleted,
+    },
 }
 
 impl HookEvent {
@@ -165,6 +273,14 @@ impl HookEvent {
             Self::Stop { .. } => "Stop",
             Self::UserPromptSubmit { .. } => "UserPromptSubmit",
             Self::Notification { .. } => "Notification",
+            Self::SessionStart { .. } => "SessionStart",
+            Self::SessionEnd { .. } => "SessionEnd",
+            Self::PermissionRequest { .. } => "PermissionRequest",
+            Self::PostToolUseFailure { .. } => "PostToolUseFailure",
+            Self::SubagentStart { .. } => "SubagentStart",
+            Self::SubagentStop { .. } => "SubagentStop",
+            Self::PreCompact { .. } => "PreCompact",
+            Self::TaskCompleted { .. } => "TaskCompleted",
         }
     }
 
@@ -178,6 +294,7 @@ impl HookEvent {
             self,
             Self::PreToolUse { .. }
                 | Self::UserPromptSubmit { .. }
+                | Self::PermissionRequest { .. }
                 | Self::Stop { .. }
         )
     }
@@ -477,6 +594,72 @@ mod tests {
             "event_type": "Notification",
             "message": "Build completed successfully",
             "level": "info",
+        });
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn hook_event_session_start_serializes_correctly() {
+        use super::HookEventSessionStart;
+
+        let hook_event = HookEvent::SessionStart {
+            event: HookEventSessionStart {
+                source: "cli".to_string(),
+                model: "claude-opus-4-6".to_string(),
+                agent_type: "codex".to_string(),
+            },
+        };
+
+        let actual = serde_json::to_value(&hook_event).expect("serialize session_start event");
+        let expected = json!({
+            "event_type": "SessionStart",
+            "source": "cli",
+            "model": "claude-opus-4-6",
+            "agent_type": "codex",
+        });
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn hook_event_permission_request_serializes_correctly() {
+        use super::HookEventPermissionRequest;
+
+        let hook_event = HookEvent::PermissionRequest {
+            event: HookEventPermissionRequest {
+                tool_name: "Edit".to_string(),
+                tool_input: json!({"file_path": "/tmp/test.txt", "content": "new content"}),
+            },
+        };
+
+        let actual = serde_json::to_value(&hook_event).expect("serialize permission_request event");
+        let expected = json!({
+            "event_type": "PermissionRequest",
+            "tool_name": "Edit",
+            "tool_input": {"file_path": "/tmp/test.txt", "content": "new content"},
+        });
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn hook_event_post_tool_use_failure_serializes_correctly() {
+        use super::HookEventPostToolUseFailure;
+
+        let hook_event = HookEvent::PostToolUseFailure {
+            event: HookEventPostToolUseFailure {
+                tool_name: "Bash".to_string(),
+                error: "Command failed with exit code 1".to_string(),
+            },
+        };
+
+        let actual =
+            serde_json::to_value(&hook_event).expect("serialize post_tool_use_failure event");
+        let expected = json!({
+            "event_type": "PostToolUseFailure",
+            "tool_name": "Bash",
+            "error": "Command failed with exit code 1",
         });
 
         assert_eq!(actual, expected);
