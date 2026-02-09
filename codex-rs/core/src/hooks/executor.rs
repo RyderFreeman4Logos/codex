@@ -128,14 +128,14 @@ impl From<HookCommandOutput> for HookResult {
 /// - Non-zero exit code → `HookOutcome::Block { message: Some(stderr_or_default) }`
 /// - Timeout → `HookOutcome::Block { message: Some("hook timed out") }`
 /// - Spawn failure → log warning and return `HookOutcome::Proceed` (fail-open)
-pub(super) fn command_hook(argv: Vec<String>, timeout: Duration) -> Hook {
+pub(super) fn command_hook(command: super::config::CommandSpec, timeout: Duration) -> Hook {
     Hook {
         func: Arc::new(move |payload: &HookPayload| {
-            let argv = argv.clone();
+            let command_spec = command.clone();
             let payload = payload.clone();
             Box::pin(async move {
-                let Some(mut command) = super::registry::command_from_argv(&argv) else {
-                    tracing::warn!("hook command argv is empty, skipping");
+                let Some(mut command) = super::registry::command_from_spec(&command_spec) else {
+                    tracing::warn!("hook command is empty, skipping");
                     return HookOutcome::Proceed.into();
                 };
 
@@ -478,12 +478,23 @@ mod tests {
         use codex_protocol::ThreadId;
         use pretty_assertions::assert_eq;
 
+        use super::super::super::config::CommandSpec;
         use super::super::super::types::HookEvent;
         use super::super::super::types::HookEventAfterAgent;
         use super::super::super::types::HookEventPreToolUse;
         use super::super::super::types::HookOutcome;
         use super::super::super::types::HookPayload;
         use super::super::command_hook;
+
+        /// Helper to create shell command spec
+        fn shell(cmd: &str) -> CommandSpec {
+            CommandSpec::Shell(cmd.to_string())
+        }
+
+        /// Helper to create argv command spec
+        fn argv(args: Vec<&str>) -> CommandSpec {
+            CommandSpec::Argv(args.iter().map(ToString::to_string).collect())
+        }
 
         fn test_payload() -> HookPayload {
             let hook_event = HookEvent::AfterAgent {
@@ -534,11 +545,7 @@ mod tests {
         async fn command_hook_empty_stdout_returns_proceed() {
             // Command reads stdin but produces no stdout → Proceed
             let hook = command_hook(
-                vec![
-                    "/bin/sh".to_string(),
-                    "-c".to_string(),
-                    "cat > /dev/null".to_string(),
-                ],
+                shell("cat > /dev/null"),
                 Duration::from_secs(5),
             );
             let result = hook.execute(&test_payload()).await;
@@ -548,11 +555,7 @@ mod tests {
         #[tokio::test]
         async fn command_hook_stdout_proceed_json() {
             let hook = command_hook(
-                vec![
-                    "/bin/sh".to_string(),
-                    "-c".to_string(),
-                    r#"cat > /dev/null; echo '{"decision":"proceed"}'"#.to_string(),
-                ],
+                shell(r#"cat > /dev/null; echo '{"decision":"proceed"}'"#),
                 Duration::from_secs(5),
             );
             let result = hook.execute(&test_payload()).await;
@@ -562,12 +565,7 @@ mod tests {
         #[tokio::test]
         async fn command_hook_stdout_block_json() {
             let hook = command_hook(
-                vec![
-                    "/bin/sh".to_string(),
-                    "-c".to_string(),
-                    r#"cat > /dev/null; echo '{"decision":"block","message":"denied by policy"}'"#
-                        .to_string(),
-                ],
+                shell(r#"cat > /dev/null; echo '{"decision":"block","message":"denied by policy"}'"#),
                 Duration::from_secs(5),
             );
             let result = hook.execute(&test_payload()).await;
@@ -582,12 +580,7 @@ mod tests {
         #[tokio::test]
         async fn command_hook_stdout_modify_json() {
             let hook = command_hook(
-                vec![
-                    "/bin/sh".to_string(),
-                    "-c".to_string(),
-                    r#"cat > /dev/null; echo '{"decision":"modify","content":"new content"}'"#
-                        .to_string(),
-                ],
+                shell(r#"cat > /dev/null; echo '{"decision":"modify","content":"new content"}'"#),
                 Duration::from_secs(5),
             );
             let result = hook.execute(&test_payload()).await;
@@ -601,12 +594,7 @@ mod tests {
 
         #[tokio::test]
         async fn command_hook_exit_2_blocks_on_blockable_event() {
-            let hook = command_hook(
-                vec![
-                    "/bin/sh".to_string(),
-                    "-c".to_string(),
-                    "cat > /dev/null; echo 'denied by hook' >&2; exit 2".to_string(),
-                ],
+            let hook = command_hook(shell("cat > /dev/null; echo 'denied by hook' >&2; exit 2"),
                 Duration::from_secs(5),
             );
             let result = hook.execute(&blockable_test_payload()).await;
@@ -624,12 +612,7 @@ mod tests {
 
         #[tokio::test]
         async fn command_hook_exit_2_empty_stderr_uses_default_message() {
-            let hook = command_hook(
-                vec![
-                    "/bin/sh".to_string(),
-                    "-c".to_string(),
-                    "cat > /dev/null; exit 2".to_string(),
-                ],
+            let hook = command_hook(shell("cat > /dev/null; exit 2"),
                 Duration::from_secs(5),
             );
             let result = hook.execute(&blockable_test_payload()).await;
@@ -648,12 +631,7 @@ mod tests {
         #[tokio::test]
         async fn command_hook_exit_2_proceeds_on_non_blockable_event() {
             // AfterAgent is not blockable — exit 2 should proceed like other non-zero codes
-            let hook = command_hook(
-                vec![
-                    "/bin/sh".to_string(),
-                    "-c".to_string(),
-                    "cat > /dev/null; exit 2".to_string(),
-                ],
+            let hook = command_hook(shell("cat > /dev/null; exit 2"),
                 Duration::from_secs(5),
             );
             let result = hook.execute(&test_payload()).await;
@@ -663,12 +641,7 @@ mod tests {
         #[tokio::test]
         async fn command_hook_nonzero_exit_nonblocking_proceeds() {
             // exit 1 is a non-blocking error — hook should proceed
-            let hook = command_hook(
-                vec![
-                    "/bin/sh".to_string(),
-                    "-c".to_string(),
-                    "cat > /dev/null; echo 'error msg' >&2; exit 1".to_string(),
-                ],
+            let hook = command_hook(shell("cat > /dev/null; echo 'error msg' >&2; exit 1"),
                 Duration::from_secs(5),
             );
             let result = hook.execute(&test_payload()).await;
@@ -678,12 +651,7 @@ mod tests {
         #[tokio::test]
         async fn command_hook_nonzero_exit_other_code_proceeds() {
             // exit 42 is a non-blocking error — hook should proceed
-            let hook = command_hook(
-                vec![
-                    "/bin/sh".to_string(),
-                    "-c".to_string(),
-                    "cat > /dev/null; exit 42".to_string(),
-                ],
+            let hook = command_hook(shell("cat > /dev/null; exit 42"),
                 Duration::from_secs(5),
             );
             let result = hook.execute(&test_payload()).await;
@@ -692,12 +660,7 @@ mod tests {
 
         #[tokio::test]
         async fn command_hook_timeout_returns_block() {
-            let hook = command_hook(
-                vec![
-                    "/bin/sh".to_string(),
-                    "-c".to_string(),
-                    "cat > /dev/null; sleep 60".to_string(),
-                ],
+            let hook = command_hook(shell("cat > /dev/null; sleep 60"),
                 Duration::from_millis(100), // Very short timeout
             );
             let result = hook.execute(&test_payload()).await;
@@ -712,12 +675,7 @@ mod tests {
 
         #[tokio::test]
         async fn command_hook_invalid_json_stdout_returns_proceed() {
-            let hook = command_hook(
-                vec![
-                    "/bin/sh".to_string(),
-                    "-c".to_string(),
-                    "cat > /dev/null; echo 'not valid json'".to_string(),
-                ],
+            let hook = command_hook(shell("cat > /dev/null; echo 'not valid json'"),
                 Duration::from_secs(5),
             );
             let result = hook.execute(&test_payload()).await;
@@ -729,7 +687,7 @@ mod tests {
         #[tokio::test]
         async fn command_hook_nonexistent_command_returns_proceed() {
             let hook = command_hook(
-                vec!["/nonexistent/command/path/xxxxx".to_string()],
+                argv(vec!["/nonexistent/command/path/xxxxx"]),
                 Duration::from_secs(5),
             );
             let result = hook.execute(&test_payload()).await;
@@ -740,7 +698,7 @@ mod tests {
 
         #[tokio::test]
         async fn command_hook_empty_argv_returns_proceed() {
-            let hook = command_hook(vec![], Duration::from_secs(5));
+            let hook = command_hook(argv(vec![]), Duration::from_secs(5));
             let result = hook.execute(&test_payload()).await;
             assert_eq!(result.outcome, HookOutcome::Proceed);
         }
@@ -750,13 +708,7 @@ mod tests {
             // Verify the hook receives the JSON payload on stdin by having
             // the script parse it and echo back a field from the payload.
             let hook = command_hook(
-                vec![
-                    "/bin/sh".to_string(),
-                    "-c".to_string(),
-                    // Read stdin, check it's valid JSON with jq-like approach,
-                    // then return proceed. We just verify it doesn't fail.
-                    "cat > /dev/null; echo '{\"decision\":\"proceed\"}'".to_string(),
-                ],
+                shell("cat > /dev/null; echo '{\"decision\":\"proceed\"}'"),
                 Duration::from_secs(5),
             );
             let result = hook.execute(&test_payload()).await;
@@ -768,11 +720,7 @@ mod tests {
             // Verify that the hook command runs in the payload's cwd directory
             // by having the script print its working directory via `pwd`.
             let hook = command_hook(
-                vec![
-                    "/bin/sh".to_string(),
-                    "-c".to_string(),
-                    "cat > /dev/null; pwd".to_string(),
-                ],
+                shell("cat > /dev/null; pwd"),
                 Duration::from_secs(5),
             );
             // test_payload() sets cwd to /tmp
@@ -786,12 +734,7 @@ mod tests {
 
             // Now verify with a JSON response that includes the cwd
             let hook = command_hook(
-                vec![
-                    "/bin/sh".to_string(),
-                    "-c".to_string(),
-                    r#"cat > /dev/null; CWD=$(pwd); echo "{\"decision\":\"block\",\"message\":\"$CWD\"}""#
-                        .to_string(),
-                ],
+                shell(r#"cat > /dev/null; CWD=$(pwd); echo "{\"decision\":\"block\",\"message\":\"$CWD\"}""#),
                 Duration::from_secs(5),
             );
             let result = hook.execute(&test_payload()).await;

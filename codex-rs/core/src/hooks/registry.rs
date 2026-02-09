@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tokio::process::Command;
 use tokio::sync::Semaphore;
 
-use super::config::hook_from_entry;
+use super::config::hooks_from_group;
 use super::types::EffectAction;
 use super::types::Hook;
 use super::types::HookAggregateEffect;
@@ -77,69 +77,83 @@ impl Hooks {
     pub(crate) fn new(config: &Config) -> Self {
         let hooks_config = &config.hooks;
 
+        if hooks_config.disable_all_hooks {
+            tracing::info!("All hooks disabled via disable_all_hooks config");
+            return Self::default();
+        }
+
         let mut after_agent: Vec<Hook> = get_notify_hook(config).into_iter().collect();
-        after_agent.extend(hooks_config.after_agent.iter().map(hook_from_entry));
+        after_agent.extend(
+            hooks_config
+                .after_agent
+                .iter()
+                .flat_map(hooks_from_group),
+        );
 
         let pre_tool_use = hooks_config
             .pre_tool_use
             .iter()
-            .map(hook_from_entry)
+            .flat_map(hooks_from_group)
             .collect();
         let post_tool_use = hooks_config
             .post_tool_use
             .iter()
-            .map(hook_from_entry)
+            .flat_map(hooks_from_group)
             .collect();
-        let stop = hooks_config.stop.iter().map(hook_from_entry).collect();
+        let stop = hooks_config
+            .stop
+            .iter()
+            .flat_map(hooks_from_group)
+            .collect();
         let user_prompt_submit = hooks_config
             .user_prompt_submit
             .iter()
-            .map(hook_from_entry)
+            .flat_map(hooks_from_group)
             .collect();
         let notification = hooks_config
             .notification
             .iter()
-            .map(hook_from_entry)
+            .flat_map(hooks_from_group)
             .collect();
         let session_start = hooks_config
             .session_start
             .iter()
-            .map(hook_from_entry)
+            .flat_map(hooks_from_group)
             .collect();
         let session_end = hooks_config
             .session_end
             .iter()
-            .map(hook_from_entry)
+            .flat_map(hooks_from_group)
             .collect();
         let permission_request = hooks_config
             .permission_request
             .iter()
-            .map(hook_from_entry)
+            .flat_map(hooks_from_group)
             .collect();
         let post_tool_use_failure = hooks_config
             .post_tool_use_failure
             .iter()
-            .map(hook_from_entry)
+            .flat_map(hooks_from_group)
             .collect();
         let subagent_start = hooks_config
             .subagent_start
             .iter()
-            .map(hook_from_entry)
+            .flat_map(hooks_from_group)
             .collect();
         let subagent_stop = hooks_config
             .subagent_stop
             .iter()
-            .map(hook_from_entry)
+            .flat_map(hooks_from_group)
             .collect();
         let pre_compact = hooks_config
             .pre_compact
             .iter()
-            .map(hook_from_entry)
+            .flat_map(hooks_from_group)
             .collect();
         let task_completed = hooks_config
             .task_completed
             .iter()
-            .map(hook_from_entry)
+            .flat_map(hooks_from_group)
             .collect();
 
         Self {
@@ -249,14 +263,46 @@ impl Hooks {
     }
 }
 
-pub(super) fn command_from_argv(argv: &[String]) -> Option<Command> {
-    let (program, args) = argv.split_first()?;
-    if program.is_empty() {
-        return None;
+/// Build a Command from a CommandSpec.
+///
+/// - Shell strings are executed via `sh -c` (or `cmd /C` on Windows)
+/// - Argv arrays are executed directly
+pub(super) fn command_from_spec(spec: &super::config::CommandSpec) -> Option<Command> {
+    use super::config::CommandSpec;
+
+    match spec {
+        CommandSpec::Shell(cmd) => {
+            if cmd.is_empty() {
+                return None;
+            }
+            let command = if cfg!(windows) {
+                let mut c = Command::new("cmd");
+                c.args(["/C", cmd]);
+                c
+            } else {
+                let mut c = Command::new("sh");
+                c.args(["-c", cmd]);
+                c
+            };
+            Some(command)
+        }
+        CommandSpec::Argv(argv) => {
+            let (program, args) = argv.split_first()?;
+            if program.is_empty() {
+                return None;
+            }
+            let mut command = Command::new(program);
+            command.args(args);
+            Some(command)
+        }
     }
-    let mut command = Command::new(program);
-    command.args(args);
-    Some(command)
+}
+
+/// Legacy helper for notify_hook (which still uses Vec<String>).
+/// Converts Vec<String> to CommandSpec::Argv and delegates to command_from_spec.
+pub(super) fn command_from_argv(argv: &[String]) -> Option<Command> {
+    use super::config::CommandSpec;
+    command_from_spec(&CommandSpec::Argv(argv.to_vec()))
 }
 
 #[cfg(test)]
@@ -403,6 +449,55 @@ mod tests {
     fn command_from_argv_returns_none_for_empty_args() {
         assert!(command_from_argv(&[]).is_none());
         assert!(command_from_argv(&["".to_string()]).is_none());
+    }
+
+    #[test]
+    fn command_from_spec_shell_empty_returns_none() {
+        use super::super::config::CommandSpec;
+        use super::command_from_spec;
+        assert!(command_from_spec(&CommandSpec::Shell(String::new())).is_none());
+    }
+
+    #[test]
+    fn command_from_spec_argv_empty_returns_none() {
+        use super::super::config::CommandSpec;
+        use super::command_from_spec;
+        assert!(command_from_spec(&CommandSpec::Argv(Vec::new())).is_none());
+        assert!(command_from_spec(&CommandSpec::Argv(vec!["".to_string()])).is_none());
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn command_from_spec_shell_executes_via_sh() -> Result<()> {
+        use super::super::config::CommandSpec;
+        use super::command_from_spec;
+        use std::process::Stdio;
+
+        let spec = CommandSpec::Shell("echo hello world".to_string());
+        let mut command = command_from_spec(&spec).ok_or_else(|| anyhow::anyhow!("command"))?;
+        let output = command.stdout(Stdio::piped()).output().await?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let trimmed = stdout.trim_end_matches(['\r', '\n']);
+        assert_eq!(trimmed, "hello world");
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn command_from_spec_shell_executes_via_cmd() -> Result<()> {
+        use super::super::config::CommandSpec;
+        use super::command_from_spec;
+        use std::process::Stdio;
+
+        let spec = CommandSpec::Shell("echo hello world".to_string());
+        let mut command = command_from_spec(&spec).ok_or_else(|| anyhow::anyhow!("command"))?;
+        let output = command.stdout(Stdio::piped()).output().await?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let trimmed = stdout.trim_end_matches(['\r', '\n']);
+        assert_eq!(trimmed, "hello world");
+        Ok(())
     }
 
     #[tokio::test]
