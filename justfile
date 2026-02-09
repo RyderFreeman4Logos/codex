@@ -44,7 +44,7 @@ install:
 #   just install-codex /usr/local/bin/codex
 install-codex dest="$HOME/.cargo/bin":
     cargo build --release -p codex-cli
-    set -e; dest_path="{{dest}}"; base="$(basename "$dest_path")"; case "$dest_path" in */) dest_path="${dest_path}codex" ;; *) if [ -d "$dest_path" ]; then dest_path="$dest_path/codex"; elif [ "$base" != "codex" ] && [ "$base" != "codex.exe" ]; then dest_path="$dest_path/codex"; fi ;; esac; mkdir -p "$(dirname "$dest_path")"; install -m 0755 target/release/codex "$dest_path"; "$dest_path" --version
+    set -e; exe_suffix=''; src_bin='target/release/codex'; if [ -f "${src_bin}.exe" ]; then exe_suffix='.exe'; src_bin="${src_bin}.exe"; fi; dest_path="{{dest}}"; base="$(basename "$dest_path")"; case "$dest_path" in */) dest_path="${dest_path}codex${exe_suffix}" ;; *) if [ -d "$dest_path" ]; then dest_path="$dest_path/codex${exe_suffix}"; elif [ "$base" != "codex" ] && [ "$base" != "codex.exe" ]; then dest_path="$dest_path/codex${exe_suffix}"; fi ;; esac; mkdir -p "$(dirname "$dest_path")"; install -m 0755 "$src_bin" "$dest_path"; "$dest_path" --version
 
 # Run `cargo nextest` since it's faster than `cargo test`, though including
 # --no-fail-fast is important to ensure all tests are run.
