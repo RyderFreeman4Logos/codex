@@ -37,6 +37,15 @@ install:
     rustup show active-toolchain
     cargo fetch
 
+# Build and install codex-cli from source.
+#
+# Pass either a directory or a full destination path:
+#   just install-codex /usr/local/bin
+#   just install-codex /usr/local/bin/codex
+install-codex dest="$HOME/.cargo/bin":
+    cargo build --release -p codex-cli
+    set -e; dest_path="{{dest}}"; case "$dest_path" in */) dest_path="${dest_path}codex" ;; *) if [ -d "$dest_path" ]; then dest_path="$dest_path/codex"; fi ;; esac; mkdir -p "$(dirname "$dest_path")"; install -m 0755 target/release/codex "$dest_path"; "$dest_path" --version
+
 # Run `cargo nextest` since it's faster than `cargo test`, though including
 # --no-fail-fast is important to ensure all tests are run.
 #
