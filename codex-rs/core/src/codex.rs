@@ -3910,11 +3910,10 @@ pub(crate) async fn run_turn(
                 if !needs_follow_up {
                     last_agent_message = sampling_request_last_agent_message;
                     sess.hooks()
-                        .dispatch(crate::hooks::HookPayload {
-                            session_id: sess.conversation_id,
-                            cwd: turn_context.cwd.clone(),
-                            triggered_at: chrono::Utc::now(),
-                            hook_event: HookEvent::AfterAgent {
+                        .dispatch(crate::hooks::HookPayload::new(
+                            sess.conversation_id,
+                            turn_context.cwd.clone(),
+                            HookEvent::AfterAgent {
                                 event: HookEventAfterAgent {
                                     thread_id: sess.conversation_id,
                                     turn_id: turn_context.sub_id.clone(),
@@ -3922,7 +3921,9 @@ pub(crate) async fn run_turn(
                                     last_assistant_message: last_agent_message.clone(),
                                 },
                             },
-                        })
+                            None,
+                            turn_context.approval_policy.to_string(),
+                        ))
                         .await;
                     break;
                 }

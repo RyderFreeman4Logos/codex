@@ -85,11 +85,18 @@ pub(super) fn command_hook(argv: Vec<String>, timeout: Duration) -> Hook {
                     return HookOutcome::Proceed;
                 };
 
+                // Set up working directory, stdio, and environment variables
+                // that Claude Code hooks expect.
+                let cwd_str = payload.cwd.display().to_string();
                 command
                     .current_dir(&payload.cwd)
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
-                    .stderr(Stdio::piped());
+                    .stderr(Stdio::piped())
+                    .env("CLAUDE_PROJECT_DIR", &cwd_str)
+                    .env("CODEX_PROJECT_DIR", &cwd_str)
+                    .env("CLAUDE_SESSION_ID", payload.session_id.to_string())
+                    .env("CODEX_SESSION_ID", payload.session_id.to_string());
 
                 let mut child = match command.spawn() {
                     Ok(child) => child,
@@ -237,16 +244,33 @@ pub(super) fn command_hook(argv: Vec<String>, timeout: Duration) -> Hook {
                     }
                 };
 
-                // Non-zero exit code → block with stderr message
+                // Exit code semantics (Claude Code compatible):
+                //   exit 0  → parse stdout JSON (below)
+                //   exit 2  → blocking error on blockable events, otherwise warn
+                //   other   → non-blocking error: Proceed + warn
                 if !status.success() {
-                    let message = if stderr_string.is_empty() {
-                        format!("hook command failed with exit code {status}")
+                    let code = status.code().unwrap_or(1);
+                    if code == 2 && payload.hook_event.is_blockable() {
+                        let message = if stderr_string.is_empty() {
+                            "hook command returned blocking error (exit 2)".to_string()
+                        } else {
+                            stderr_string
+                        };
+                        return HookOutcome::Block {
+                            message: Some(message),
+                        };
+                    }
+                    // Non-blocking error (or exit 2 on non-blockable event): log and continue
+                    if !stderr_string.is_empty() {
+                        tracing::warn!(
+                            "hook exited with code {code} (non-blocking): {stderr_string}"
+                        );
                     } else {
-                        stderr_string
-                    };
-                    return HookOutcome::Block {
-                        message: Some(message),
-                    };
+                        tracing::warn!(
+                            "hook exited with code {code} (non-blocking)"
+                        );
+                    }
+                    return HookOutcome::Proceed;
                 }
 
                 // Exit code 0: parse stdout or default to Proceed
@@ -327,11 +351,20 @@ mod tests {
 
         use super::super::super::types::HookEvent;
         use super::super::super::types::HookEventAfterAgent;
+        use super::super::super::types::HookEventPreToolUse;
         use super::super::super::types::HookOutcome;
         use super::super::super::types::HookPayload;
         use super::super::command_hook;
 
         fn test_payload() -> HookPayload {
+            let hook_event = HookEvent::AfterAgent {
+                event: HookEventAfterAgent {
+                    thread_id: ThreadId::new(),
+                    turn_id: "test".to_string(),
+                    input_messages: vec!["hello".to_string()],
+                    last_assistant_message: None,
+                },
+            };
             HookPayload {
                 session_id: ThreadId::new(),
                 cwd: PathBuf::from("/tmp"),
@@ -339,14 +372,32 @@ mod tests {
                     .with_ymd_and_hms(2025, 1, 1, 0, 0, 0)
                     .single()
                     .expect("valid timestamp"),
-                hook_event: HookEvent::AfterAgent {
-                    event: HookEventAfterAgent {
-                        thread_id: ThreadId::new(),
-                        turn_id: "test".to_string(),
-                        input_messages: vec!["hello".to_string()],
-                        last_assistant_message: None,
-                    },
+                hook_event_name: hook_event.hook_event_name().to_string(),
+                transcript_path: None,
+                permission_mode: "on-request".to_string(),
+                hook_event,
+            }
+        }
+
+        /// Returns a payload with a blockable event (PreToolUse).
+        fn blockable_test_payload() -> HookPayload {
+            let hook_event = HookEvent::PreToolUse {
+                event: HookEventPreToolUse {
+                    tool_name: "bash".to_string(),
+                    tool_input: serde_json::json!({}),
                 },
+            };
+            HookPayload {
+                session_id: ThreadId::new(),
+                cwd: PathBuf::from("/tmp"),
+                triggered_at: Utc
+                    .with_ymd_and_hms(2025, 1, 1, 0, 0, 0)
+                    .single()
+                    .expect("valid timestamp"),
+                hook_event_name: hook_event.hook_event_name().to_string(),
+                transcript_path: None,
+                permission_mode: "on-request".to_string(),
+                hook_event,
             }
         }
 
@@ -420,7 +471,69 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn command_hook_nonzero_exit_returns_block() {
+        async fn command_hook_exit_2_blocks_on_blockable_event() {
+            let hook = command_hook(
+                vec![
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    "cat > /dev/null; echo 'denied by hook' >&2; exit 2".to_string(),
+                ],
+                Duration::from_secs(5),
+            );
+            let outcome = hook.execute(&blockable_test_payload()).await;
+            match outcome {
+                HookOutcome::Block { message } => {
+                    let msg = message.expect("should have error message");
+                    assert!(
+                        msg.contains("denied by hook"),
+                        "stderr should be in message: {msg}"
+                    );
+                }
+                other => panic!("expected Block for exit 2 on blockable event, got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn command_hook_exit_2_empty_stderr_uses_default_message() {
+            let hook = command_hook(
+                vec![
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    "cat > /dev/null; exit 2".to_string(),
+                ],
+                Duration::from_secs(5),
+            );
+            let outcome = hook.execute(&blockable_test_payload()).await;
+            match outcome {
+                HookOutcome::Block { message } => {
+                    let msg = message.expect("should have error message");
+                    assert!(
+                        msg.contains("blocking error"),
+                        "message should mention blocking error: {msg}"
+                    );
+                }
+                other => panic!("expected Block for exit 2 on blockable event, got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn command_hook_exit_2_proceeds_on_non_blockable_event() {
+            // AfterAgent is not blockable — exit 2 should proceed like other non-zero codes
+            let hook = command_hook(
+                vec![
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    "cat > /dev/null; exit 2".to_string(),
+                ],
+                Duration::from_secs(5),
+            );
+            let outcome = hook.execute(&test_payload()).await;
+            assert_eq!(outcome, HookOutcome::Proceed);
+        }
+
+        #[tokio::test]
+        async fn command_hook_nonzero_exit_nonblocking_proceeds() {
+            // exit 1 is a non-blocking error — hook should proceed
             let hook = command_hook(
                 vec![
                     "/bin/sh".to_string(),
@@ -430,20 +543,12 @@ mod tests {
                 Duration::from_secs(5),
             );
             let outcome = hook.execute(&test_payload()).await;
-            match outcome {
-                HookOutcome::Block { message } => {
-                    let msg = message.expect("should have error message");
-                    assert!(
-                        msg.contains("error msg"),
-                        "stderr should be in message: {msg}"
-                    );
-                }
-                other => panic!("expected Block, got {other:?}"),
-            }
+            assert_eq!(outcome, HookOutcome::Proceed);
         }
 
         #[tokio::test]
-        async fn command_hook_nonzero_exit_empty_stderr_uses_exit_code() {
+        async fn command_hook_nonzero_exit_other_code_proceeds() {
+            // exit 42 is a non-blocking error — hook should proceed
             let hook = command_hook(
                 vec![
                     "/bin/sh".to_string(),
@@ -453,16 +558,7 @@ mod tests {
                 Duration::from_secs(5),
             );
             let outcome = hook.execute(&test_payload()).await;
-            match outcome {
-                HookOutcome::Block { message } => {
-                    let msg = message.expect("should have error message");
-                    assert!(
-                        msg.contains("exit"),
-                        "message should mention exit code: {msg}"
-                    );
-                }
-                other => panic!("expected Block, got {other:?}"),
-            }
+            assert_eq!(outcome, HookOutcome::Proceed);
         }
 
         #[tokio::test]

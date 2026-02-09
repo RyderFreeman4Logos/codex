@@ -26,6 +26,19 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::instrument;
 
+/// Map internal tool names to Claude Code compatible names for hook payloads.
+///
+/// Claude Code uses PascalCase tool names (e.g. `Bash`, `Read`, `Write`),
+/// while Codex uses snake_case internally (e.g. `local_shell`).  This mapping
+/// ensures hook scripts see the same names regardless of which agent they run
+/// under.
+fn hook_tool_name(internal_name: &str) -> String {
+    match internal_name {
+        "local_shell" => "Bash".to_string(),
+        other => other.to_string(),
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ToolCall {
     pub tool_name: String,
@@ -155,21 +168,23 @@ impl ToolRouter {
         // Extract structured tool input for hooks (preserves shell arg
         // boundaries and workdir overrides, unlike log_payload()).
         let tool_input = payload.hook_input();
+        let hook_name = hook_tool_name(&tool_name);
 
         // --- PreToolUse hook ---
         let pre_outcome = session
             .hooks()
-            .dispatch(HookPayload {
-                session_id: session.conversation_id,
-                cwd: turn.cwd.clone(),
-                triggered_at: chrono::Utc::now(),
-                hook_event: HookEvent::PreToolUse {
+            .dispatch(HookPayload::new(
+                session.conversation_id,
+                turn.cwd.clone(),
+                HookEvent::PreToolUse {
                     event: HookEventPreToolUse {
-                        tool_name: tool_name.clone(),
+                        tool_name: hook_name.clone(),
                         tool_input: tool_input.clone(),
                     },
                 },
-            })
+                None,
+                turn.approval_policy.to_string(),
+            ))
             .await;
 
         match pre_outcome {
@@ -238,19 +253,21 @@ impl ToolRouter {
             let hooks = session.hooks().clone();
             let cwd = turn.cwd.clone();
             let conversation_id = session.conversation_id;
+            let permission_mode = turn.approval_policy.to_string();
             tokio::spawn(async move {
                 hooks
-                    .dispatch(HookPayload {
-                        session_id: conversation_id,
+                    .dispatch(HookPayload::new(
+                        conversation_id,
                         cwd,
-                        triggered_at: chrono::Utc::now(),
-                        hook_event: HookEvent::PostToolUse {
+                        HookEvent::PostToolUse {
                             event: HookEventPostToolUse {
-                                tool_name,
+                                tool_name: hook_name,
                                 tool_output,
                             },
                         },
-                    })
+                        None,
+                        permission_mode,
+                    ))
                     .await;
             });
         }

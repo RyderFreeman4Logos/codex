@@ -427,8 +427,8 @@
           "type": "string"
         },
         "timeout": {
-          "default": 30,
-          "description": "Optional timeout in seconds (default: 30).",
+          "default": 600,
+          "description": "Optional timeout in seconds (default: 600, matching Claude Code).",
           "format": "uint64",
           "minimum": 0.0,
           "type": "integer"

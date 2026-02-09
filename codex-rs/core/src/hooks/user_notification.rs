@@ -141,7 +141,7 @@ mod tests {
         let hook_event = HookEvent::PreToolUse {
             event: HookEventPreToolUse {
                 tool_name: "bash".to_string(),
-                tool_input: r#"{"command": "ls"}"#.to_string(),
+                tool_input: serde_json::json!({"command": "ls"}),
             },
         };
 
@@ -150,9 +150,9 @@ mod tests {
 
         // PreToolUse events use new protocol, not legacy format
         let expected = json!({
-            "event_type": "pre_tool_use",
+            "event_type": "PreToolUse",
             "tool_name": "bash",
-            "tool_input": r#"{"command": "ls"}"#,
+            "tool_input": {"command": "ls"},
         });
 
         assert_eq!(actual, expected);
@@ -174,9 +174,9 @@ mod tests {
         let actual: Value = serde_json::from_str(&serialized)?;
 
         let expected = json!({
-            "event_type": "post_tool_use",
+            "event_type": "PostToolUse",
             "tool_name": "bash",
-            "tool_output": "file1.txt\nfile2.txt",
+            "tool_response": "file1.txt\nfile2.txt",
         });
 
         assert_eq!(actual, expected);
@@ -197,7 +197,7 @@ mod tests {
         let actual: Value = serde_json::from_str(&serialized)?;
 
         let expected = json!({
-            "event_type": "stop",
+            "event_type": "Stop",
             "reason": "max_tokens",
         });
 

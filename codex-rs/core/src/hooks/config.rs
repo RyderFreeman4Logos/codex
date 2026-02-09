@@ -14,7 +14,7 @@ pub struct HookEntryToml {
     /// The command to execute as argv (program + args).
     pub command: Vec<String>,
 
-    /// Optional timeout in seconds (default: 30).
+    /// Optional timeout in seconds (default: 600, matching Claude Code).
     #[serde(default = "default_timeout_secs")]
     pub timeout: u64,
 
@@ -32,7 +32,7 @@ pub struct HookEntryToml {
 }
 
 fn default_timeout_secs() -> u64 {
-    30
+    600
 }
 
 /// All hook entries grouped by event type.
@@ -131,7 +131,7 @@ mod tests {
         "#;
         let entry: HookEntryToml = toml::from_str(toml_str).unwrap();
         assert_eq!(entry.command, vec!["./hook.sh"]);
-        assert_eq!(entry.timeout, 30); // default
+        assert_eq!(entry.timeout, 600); // default
         assert_eq!(entry.matcher, None); // default
     }
 
@@ -175,14 +175,14 @@ mod tests {
         assert_eq!(config.after_agent[0].command, vec!["./hook1.sh"]);
         assert_eq!(config.after_agent[0].timeout, 45);
         assert_eq!(config.after_agent[1].command, vec!["./hook2.sh"]);
-        assert_eq!(config.after_agent[1].timeout, 30); // default
+        assert_eq!(config.after_agent[1].timeout, 600); // default
     }
 
     #[test]
     fn test_matches_tool_none_matches_all() {
         let entry = HookEntryToml {
             command: vec!["./hook.sh".to_string()],
-            timeout: 30,
+            timeout: 600,
             matcher: None,
         };
         assert!(matches_tool(&entry, "shell"));
@@ -194,7 +194,7 @@ mod tests {
     fn test_matches_tool_exact() {
         let entry = HookEntryToml {
             command: vec!["./hook.sh".to_string()],
-            timeout: 30,
+            timeout: 600,
             matcher: Some("shell".to_string()),
         };
         assert!(matches_tool(&entry, "shell"));
@@ -206,7 +206,7 @@ mod tests {
     fn test_matches_tool_glob_prefix() {
         let entry = HookEntryToml {
             command: vec!["./hook.sh".to_string()],
-            timeout: 30,
+            timeout: 600,
             matcher: Some("shell*".to_string()),
         };
         assert!(matches_tool(&entry, "shell"));
@@ -219,7 +219,7 @@ mod tests {
     fn test_matches_tool_wildcard() {
         let entry = HookEntryToml {
             command: vec!["./hook.sh".to_string()],
-            timeout: 30,
+            timeout: 600,
             matcher: Some("*".to_string()),
         };
         assert!(matches_tool(&entry, "shell"));
@@ -232,7 +232,7 @@ mod tests {
     fn test_matches_tool_no_match() {
         let entry = HookEntryToml {
             command: vec!["./hook.sh".to_string()],
-            timeout: 30,
+            timeout: 600,
             matcher: Some("read".to_string()),
         };
         assert!(matches_tool(&entry, "read"));
@@ -314,6 +314,14 @@ mod tests {
         use codex_protocol::ThreadId;
         use std::path::PathBuf;
 
+        let hook_event = HookEvent::AfterAgent {
+            event: HookEventAfterAgent {
+                thread_id: ThreadId::new(),
+                turn_id: "test".to_string(),
+                input_messages: vec!["test".to_string()],
+                last_assistant_message: None,
+            },
+        };
         let payload = HookPayload {
             session_id: ThreadId::new(),
             cwd: PathBuf::from("/tmp"),
@@ -321,14 +329,10 @@ mod tests {
                 .with_ymd_and_hms(2025, 1, 1, 0, 0, 0)
                 .single()
                 .expect("valid timestamp"),
-            hook_event: HookEvent::AfterAgent {
-                event: HookEventAfterAgent {
-                    thread_id: ThreadId::new(),
-                    turn_id: "test".to_string(),
-                    input_messages: vec!["test".to_string()],
-                    last_assistant_message: None,
-                },
-            },
+            hook_event_name: hook_event.hook_event_name().to_string(),
+            transcript_path: None,
+            permission_mode: "on-request".to_string(),
+            hook_event,
         };
 
         // Hook should execute without panicking

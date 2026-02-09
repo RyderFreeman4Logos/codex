@@ -151,6 +151,14 @@ mod tests {
     const INPUT_MESSAGE: &str = "hello";
 
     fn hook_payload(label: &str) -> HookPayload {
+        let hook_event = HookEvent::AfterAgent {
+            event: HookEventAfterAgent {
+                thread_id: ThreadId::new(),
+                turn_id: format!("turn-{label}"),
+                input_messages: vec![INPUT_MESSAGE.to_string()],
+                last_assistant_message: Some("hi".to_string()),
+            },
+        };
         HookPayload {
             session_id: ThreadId::new(),
             cwd: PathBuf::from(CWD),
@@ -158,14 +166,10 @@ mod tests {
                 .with_ymd_and_hms(2025, 1, 1, 0, 0, 0)
                 .single()
                 .expect("valid timestamp"),
-            hook_event: HookEvent::AfterAgent {
-                event: HookEventAfterAgent {
-                    thread_id: ThreadId::new(),
-                    turn_id: format!("turn-{label}"),
-                    input_messages: vec![INPUT_MESSAGE.to_string()],
-                    last_assistant_message: Some("hi".to_string()),
-                },
-            },
+            hook_event_name: hook_event.hook_event_name().to_string(),
+            transcript_path: None,
+            permission_mode: "on-request".to_string(),
+            hook_event,
         }
     }
 
@@ -207,6 +211,12 @@ mod tests {
     fn hook_payload_pre_tool_use(label: &str) -> HookPayload {
         use super::super::types::HookEventPreToolUse;
 
+        let hook_event = HookEvent::PreToolUse {
+            event: HookEventPreToolUse {
+                tool_name: format!("tool-{label}"),
+                tool_input: serde_json::json!({"arg": "value"}),
+            },
+        };
         HookPayload {
             session_id: ThreadId::new(),
             cwd: PathBuf::from(CWD),
@@ -214,18 +224,22 @@ mod tests {
                 .with_ymd_and_hms(2025, 1, 1, 0, 0, 0)
                 .single()
                 .expect("valid timestamp"),
-            hook_event: HookEvent::PreToolUse {
-                event: HookEventPreToolUse {
-                    tool_name: format!("tool-{label}"),
-                    tool_input: r#"{"arg": "value"}"#.to_string(),
-                },
-            },
+            hook_event_name: hook_event.hook_event_name().to_string(),
+            transcript_path: None,
+            permission_mode: "on-request".to_string(),
+            hook_event,
         }
     }
 
     fn hook_payload_post_tool_use(label: &str) -> HookPayload {
         use super::super::types::HookEventPostToolUse;
 
+        let hook_event = HookEvent::PostToolUse {
+            event: HookEventPostToolUse {
+                tool_name: format!("tool-{label}"),
+                tool_output: "success".to_string(),
+            },
+        };
         HookPayload {
             session_id: ThreadId::new(),
             cwd: PathBuf::from(CWD),
@@ -233,12 +247,10 @@ mod tests {
                 .with_ymd_and_hms(2025, 1, 1, 0, 0, 0)
                 .single()
                 .expect("valid timestamp"),
-            hook_event: HookEvent::PostToolUse {
-                event: HookEventPostToolUse {
-                    tool_name: format!("tool-{label}"),
-                    tool_output: "success".to_string(),
-                },
-            },
+            hook_event_name: hook_event.hook_event_name().to_string(),
+            transcript_path: None,
+            permission_mode: "on-request".to_string(),
+            hook_event,
         }
     }
 
