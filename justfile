@@ -39,13 +39,13 @@ install:
 
 # Build and install codex-cli from source.
 #
-# Pass a destination directory (with or without trailing slash). Optionally pass a
-# custom filename:
+# Pass a destination directory (with or without trailing slash, even if it doesn't
+# exist). Optionally pass a custom filename:
 #   just install-codex /usr/local/bin
 #   just install-codex /usr/local/bin codex-cli
 #
-# Backwards-compatible: you may also pass an explicit destination path ending in
-# `codex`/`codex.exe`:
+# Backwards-compatible: the first argument may also be a full destination path,
+# but only when the filename is `codex`/`codex.exe`:
 #   just install-codex /usr/local/bin/codex
 install-codex dest="$HOME/.cargo/bin" name="":
     cargo build --release -p codex-cli
