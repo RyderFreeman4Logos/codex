@@ -1,5 +1,7 @@
+use std::sync::Arc;
 use std::time::Duration;
 
+use regex::Regex;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
@@ -18,15 +20,18 @@ pub struct HookEntryToml {
     #[serde(default = "default_timeout_secs")]
     pub timeout: u64,
 
-    /// Optional matcher pattern for tool-use hooks.
+    /// Optional regex pattern for tool-use hooks.
     ///
-    /// Supported patterns:
-    /// - `"*"` matches any tool name
-    /// - `"prefix*"` matches tool names starting with `prefix`
-    /// - `"exact"` matches only that exact tool name
+    /// Special values:
+    /// - `None`, empty string, or `"*"` matches all tool names
+    /// - Any other string is compiled as a regex pattern
     ///
-    /// Note: suffix patterns like `"*shell"` and infix patterns like
-    /// `"read_*_file"` are **not** supported.
+    /// Examples:
+    /// - `"^Bash$"` matches exactly "Bash"
+    /// - `"mcp__.*__write.*"` matches MCP write tools
+    /// - `"shell.*"` matches tool names starting with "shell"
+    ///
+    /// If regex compilation fails, a warning is logged and the hook won't match any tools.
     #[serde(default)]
     pub matcher: Option<String>,
 }
@@ -61,52 +66,71 @@ pub struct HooksConfigToml {
 /// Convert a single HookEntryToml into a Hook via the command executor.
 ///
 /// If the entry has a matcher pattern, the hook will only execute for events
-/// whose tool name matches the pattern. Non-tool events always match.
+/// whose tool name matches the regex pattern. Non-tool events always match.
 pub(super) fn hook_from_entry(entry: &HookEntryToml) -> Hook {
     let timeout = Duration::from_secs(entry.timeout);
     let inner = command_hook(entry.command.clone(), timeout);
     match &entry.matcher {
         None => inner,
+        Some(pattern) if pattern.is_empty() || pattern == "*" => inner,
         Some(pattern) => {
-            let pattern = pattern.clone();
+            // Pre-compile the regex once and share it via Arc
+            let regex = match Regex::new(pattern) {
+                Ok(re) => Some(Arc::new(re)),
+                Err(e) => {
+                    tracing::warn!(
+                        pattern = %pattern,
+                        error = %e,
+                        "Invalid regex pattern in hook matcher, hook will not match any tools"
+                    );
+                    None
+                }
+            };
+
             Hook {
-                func: std::sync::Arc::new(move |payload| {
+                func: Arc::new(move |payload| {
                     let tool_name = match &payload.hook_event {
                         super::types::HookEvent::PreToolUse { event } => Some(&event.tool_name),
                         super::types::HookEvent::PostToolUse { event } => Some(&event.tool_name),
                         _ => None, // Non-tool events always match
                     };
 
-                    if let Some(name) = tool_name
-                        && !matches_pattern(&pattern, name)
-                    {
-                        return Box::pin(async { super::types::HookOutcome::Proceed });
+                    if let Some(name) = tool_name {
+                        // If regex compilation failed or doesn't match, skip execution
+                        if regex
+                            .as_ref()
+                            .is_some_and(|re| re.is_match(name.as_str()))
+                        {
+                            inner.func.clone()(payload)
+                        } else {
+                            Box::pin(async { super::types::HookResult::default() })
+                        }
+                    } else {
+                        // Non-tool events always execute
+                        inner.func.clone()(payload)
                     }
-
-                    inner.func.clone()(payload)
                 }),
             }
         }
     }
 }
 
-/// Check if a tool name matches a simple pattern.
+/// Check if a tool name matches a regex pattern.
 ///
-/// Supports three forms:
-/// - `"*"` matches any tool name.
-/// - `"prefix*"` (trailing wildcard) matches tool names starting with `prefix`.
-/// - Any other string is compared as an exact match.
+/// Special cases:
+/// - `None`, empty string, or `"*"` matches all tool names
+/// - Any other string is compiled as a regex and matched against the tool name
 ///
-/// Full glob semantics (suffix, infix wildcards) are intentionally not
-/// supported to keep the matching logic trivial and predictable.
+/// Returns false if the regex compilation fails.
+#[cfg(test)]
 fn matches_pattern(pattern: &str, tool_name: &str) -> bool {
-    if pattern == "*" {
+    if pattern.is_empty() || pattern == "*" {
         return true;
     }
-    if let Some(prefix) = pattern.strip_suffix('*') {
-        return tool_name.starts_with(prefix);
+    match Regex::new(pattern) {
+        Ok(re) => re.is_match(tool_name),
+        Err(_) => false,
     }
-    pattern == tool_name
 }
 
 #[cfg(test)]
@@ -140,12 +164,12 @@ mod tests {
         let toml_str = r#"
             command = ["./pre-tool.sh", "--verbose"]
             timeout = 60
-            matcher = "shell*"
+            matcher = "shell.*"
         "#;
         let entry: HookEntryToml = toml::from_str(toml_str).unwrap();
         assert_eq!(entry.command, vec!["./pre-tool.sh", "--verbose"]);
         assert_eq!(entry.timeout, 60);
-        assert_eq!(entry.matcher, Some("shell*".to_string()));
+        assert_eq!(entry.matcher, Some("shell.*".to_string()));
     }
 
     #[test]
@@ -195,7 +219,7 @@ mod tests {
         let entry = HookEntryToml {
             command: vec!["./hook.sh".to_string()],
             timeout: 600,
-            matcher: Some("shell".to_string()),
+            matcher: Some("^shell$".to_string()),
         };
         assert!(matches_tool(&entry, "shell"));
         assert!(!matches_tool(&entry, "shell_exec"));
@@ -203,11 +227,11 @@ mod tests {
     }
 
     #[test]
-    fn test_matches_tool_glob_prefix() {
+    fn test_matches_tool_regex_prefix() {
         let entry = HookEntryToml {
             command: vec!["./hook.sh".to_string()],
             timeout: 600,
-            matcher: Some("shell*".to_string()),
+            matcher: Some("shell.*".to_string()),
         };
         assert!(matches_tool(&entry, "shell"));
         assert!(matches_tool(&entry, "shell_exec"));
@@ -233,7 +257,7 @@ mod tests {
         let entry = HookEntryToml {
             command: vec!["./hook.sh".to_string()],
             timeout: 600,
-            matcher: Some("read".to_string()),
+            matcher: Some("^read$".to_string()),
         };
         assert!(matches_tool(&entry, "read"));
         assert!(!matches_tool(&entry, "write"));
@@ -246,7 +270,7 @@ mod tests {
             [[pre_tool_use]]
             command = ["./validate-tool.sh"]
             timeout = 10
-            matcher = "bash*"
+            matcher = "bash.*"
 
             [[pre_tool_use]]
             command = ["./log-tool.sh", "--verbose"]
@@ -256,7 +280,7 @@ mod tests {
         assert_eq!(config.pre_tool_use.len(), 2);
         assert_eq!(config.pre_tool_use[0].command, vec!["./validate-tool.sh"]);
         assert_eq!(config.pre_tool_use[0].timeout, 10);
-        assert_eq!(config.pre_tool_use[0].matcher, Some("bash*".to_string()));
+        assert_eq!(config.pre_tool_use[0].matcher, Some("bash.*".to_string()));
         assert_eq!(
             config.pre_tool_use[1].command,
             vec!["./log-tool.sh", "--verbose"]
@@ -272,7 +296,7 @@ mod tests {
 
             [[pre_tool_use]]
             command = ["./pre-tool.sh"]
-            matcher = "bash"
+            matcher = "^bash$"
 
             [[post_tool_use]]
             command = ["./post-tool.sh"]
@@ -293,6 +317,57 @@ mod tests {
         assert_eq!(config.notification.len(), 1);
         assert_eq!(config.stop.len(), 1);
         assert_eq!(config.user_prompt_submit.len(), 1);
+    }
+
+    #[test]
+    fn test_matches_tool_mcp_pattern() {
+        let entry = HookEntryToml {
+            command: vec!["./hook.sh".to_string()],
+            timeout: 600,
+            matcher: Some("mcp__.*__write.*".to_string()),
+        };
+        assert!(matches_tool(&entry, "mcp__memory__write_note"));
+        assert!(matches_tool(&entry, "mcp__storage__write_file"));
+        assert!(matches_tool(&entry, "mcp__db__write_record"));
+        assert!(!matches_tool(&entry, "mcp__memory__read_note"));
+        assert!(!matches_tool(&entry, "read"));
+    }
+
+    #[test]
+    fn test_matches_tool_exact_with_anchors() {
+        let entry = HookEntryToml {
+            command: vec!["./hook.sh".to_string()],
+            timeout: 600,
+            matcher: Some("^Bash$".to_string()),
+        };
+        assert!(matches_tool(&entry, "Bash"));
+        assert!(!matches_tool(&entry, "bash"));
+        assert!(!matches_tool(&entry, "BashScript"));
+        assert!(!matches_tool(&entry, "MyBash"));
+    }
+
+    #[test]
+    fn test_matches_tool_empty_string_matches_all() {
+        let entry = HookEntryToml {
+            command: vec!["./hook.sh".to_string()],
+            timeout: 600,
+            matcher: Some("".to_string()),
+        };
+        assert!(matches_tool(&entry, "anything"));
+        assert!(matches_tool(&entry, "Bash"));
+        assert!(matches_tool(&entry, "mcp__memory__write"));
+    }
+
+    #[test]
+    fn test_matches_tool_invalid_regex() {
+        let entry = HookEntryToml {
+            command: vec!["./hook.sh".to_string()],
+            timeout: 600,
+            matcher: Some("[invalid(".to_string()),
+        };
+        // Invalid regex should not match anything
+        assert!(!matches_tool(&entry, "anything"));
+        assert!(!matches_tool(&entry, "Bash"));
     }
 
     #[tokio::test]
@@ -336,10 +411,10 @@ mod tests {
         };
 
         // Hook should execute without panicking
-        let outcome = hook.execute(&payload).await;
+        let result = hook.execute(&payload).await;
 
         // command_hook returns Proceed on success
         use super::super::types::HookOutcome;
-        assert_eq!(outcome, HookOutcome::Proceed);
+        assert_eq!(result.outcome, HookOutcome::Proceed);
     }
 }

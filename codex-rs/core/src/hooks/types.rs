@@ -11,7 +11,7 @@ use serde::Serializer;
 use serde_json::Value as JsonValue;
 
 pub(crate) type HookFn =
-    Arc<dyn for<'a> Fn(&'a HookPayload) -> BoxFuture<'a, HookOutcome> + Send + Sync>;
+    Arc<dyn for<'a> Fn(&'a HookPayload) -> BoxFuture<'a, HookResult> + Send + Sync>;
 
 #[derive(Clone)]
 pub(crate) struct Hook {
@@ -21,13 +21,13 @@ pub(crate) struct Hook {
 impl Default for Hook {
     fn default() -> Self {
         Self {
-            func: Arc::new(|_| Box::pin(async { HookOutcome::Proceed })),
+            func: Arc::new(|_| Box::pin(async { HookResult::default() })),
         }
     }
 }
 
 impl Hook {
-    pub(super) async fn execute(&self, payload: &HookPayload) -> HookOutcome {
+    pub(super) async fn execute(&self, payload: &HookPayload) -> HookResult {
         (self.func)(payload).await
     }
 }
@@ -192,6 +192,109 @@ pub(crate) enum HookOutcome {
     Block { message: Option<String> },
     /// Hook requests modifying the input or output content.
     Modify { content: String },
+}
+
+/// Metadata from hook command output that is orthogonal to the decision.
+///
+/// These fields are parsed from the hook's stdout JSON but are not part
+/// of the proceed/block/modify decision flow. They are collected by the
+/// aggregation layer (HookAggregateEffect) for downstream processing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct HookOutputMeta {
+    /// System message to inject into the conversation.
+    pub system_message: Option<String>,
+    /// Override the stop reason for Stop events.
+    pub stop_reason: Option<String>,
+    /// Whether to suppress the tool output from display.
+    pub suppress_output: Option<bool>,
+}
+
+/// Combined result from a single hook execution: the decision + any metadata.
+#[derive(Debug, Clone)]
+pub(crate) struct HookResult {
+    pub outcome: HookOutcome,
+    pub meta: HookOutputMeta,
+}
+
+impl Default for HookResult {
+    fn default() -> Self {
+        Self {
+            outcome: HookOutcome::Proceed,
+            meta: HookOutputMeta::default(),
+        }
+    }
+}
+
+impl From<HookOutcome> for HookResult {
+    fn from(outcome: HookOutcome) -> Self {
+        Self {
+            outcome,
+            meta: HookOutputMeta::default(),
+        }
+    }
+}
+
+/// Final action decided by the hook aggregation layer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum EffectAction {
+    /// Continue with the operation normally.
+    Proceed,
+    /// Block the operation with a reason message.
+    Block { reason: String },
+    /// Stop processing further hooks but proceed with the operation.
+    /// Maps to the Claude Code "skip" decision: remaining hooks are skipped
+    /// but the operation itself is not blocked.
+    #[allow(dead_code)] // Will be used when skip decision is wired up.
+    StopProcessing,
+}
+
+/// Aggregated effect from running all matching hooks for an event.
+///
+/// Produced by the registry after running every hook registered for an event
+/// and combining their individual outcomes. Carries the final action decision
+/// plus any metadata collected from hook command outputs.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct HookAggregateEffect {
+    /// The final action: proceed, block, or stop processing.
+    pub action: EffectAction,
+    /// System messages collected from hook outputs (injected into conversation).
+    pub system_messages: Vec<String>,
+    /// Additional context strings from hook outputs.
+    #[allow(dead_code)] // Will be populated when additional_context field is wired up.
+    pub additional_context: Vec<String>,
+    /// Modified content from a Modify decision (raw string).
+    /// When set, the caller should apply this as the new tool input/arguments.
+    pub modified_content: Option<String>,
+    /// Whether to suppress tool output display (any hook can set this).
+    pub suppress_output: bool,
+    /// Override stop reason for Stop events (last writer wins).
+    pub stop_reason: Option<String>,
+}
+
+impl Default for HookAggregateEffect {
+    fn default() -> Self {
+        Self {
+            action: EffectAction::Proceed,
+            system_messages: Vec::new(),
+            additional_context: Vec::new(),
+            modified_content: None,
+            suppress_output: false,
+            stop_reason: None,
+        }
+    }
+}
+
+impl HookAggregateEffect {
+    /// Create a Block effect with a reason.
+    #[allow(dead_code)] // Convenience constructor; direct construction is also valid.
+    pub fn block(reason: impl Into<String>) -> Self {
+        Self {
+            action: EffectAction::Block {
+                reason: reason.into(),
+            },
+            ..Default::default()
+        }
+    }
 }
 
 #[cfg(test)]

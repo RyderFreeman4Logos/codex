@@ -5,7 +5,7 @@ use crate::function_tool::FunctionCallError;
 use crate::hooks::HookEvent;
 use crate::hooks::HookEventPostToolUse;
 use crate::hooks::HookEventPreToolUse;
-use crate::hooks::HookOutcome;
+use crate::hooks::EffectAction;
 use crate::hooks::HookPayload;
 use crate::sandboxing::SandboxPermissions;
 use crate::tools::context::SharedTurnDiffTracker;
@@ -187,42 +187,55 @@ impl ToolRouter {
             ))
             .await;
 
-        match pre_outcome {
-            HookOutcome::Proceed => {}
-            HookOutcome::Block { message } => {
-                let block_msg =
-                    message.unwrap_or_else(|| "Blocked by pre_tool_use hook".to_string());
+        // Emit Warning events for any system messages from hooks.
+        for msg in &pre_outcome.system_messages {
+            session
+                .send_event(
+                    &turn,
+                    codex_protocol::protocol::EventMsg::Warning(
+                        codex_protocol::protocol::WarningEvent {
+                            message: format!("[hook] {msg}"),
+                        },
+                    ),
+                )
+                .await;
+        }
+
+        match pre_outcome.action {
+            EffectAction::Proceed | EffectAction::StopProcessing => {
+                // If a hook returned Modify, apply the modified content.
+                if let Some(content) = pre_outcome.modified_content {
+                    match &mut payload {
+                        ToolPayload::Function { arguments } => {
+                            *arguments = content;
+                        }
+                        ToolPayload::Mcp { raw_arguments, .. } => {
+                            *raw_arguments = content;
+                        }
+                        ToolPayload::Custom { input } => {
+                            *input = content;
+                        }
+                        ToolPayload::LocalShell { .. } => {
+                            // Modifying shell command structure from a hook is
+                            // not safely supported.  Block the call so the
+                            // hook's policy intent is not silently bypassed.
+                            return Ok(Self::failure_response(
+                                failure_call_id,
+                                payload_outputs_custom,
+                                FunctionCallError::ToolCallBlocked(
+                                    "pre_tool_use hook returned Modify for local_shell which is not supported; blocking execution".to_string(),
+                                ),
+                            ));
+                        }
+                    }
+                }
+            }
+            EffectAction::Block { reason } => {
                 return Ok(Self::failure_response(
                     failure_call_id,
                     payload_outputs_custom,
-                    FunctionCallError::ToolCallBlocked(block_msg),
+                    FunctionCallError::ToolCallBlocked(reason),
                 ));
-            }
-            HookOutcome::Modify { content } => {
-                // Apply the modified content to the tool arguments.
-                match &mut payload {
-                    ToolPayload::Function { arguments } => {
-                        *arguments = content;
-                    }
-                    ToolPayload::Mcp { raw_arguments, .. } => {
-                        *raw_arguments = content;
-                    }
-                    ToolPayload::Custom { input } => {
-                        *input = content;
-                    }
-                    ToolPayload::LocalShell { .. } => {
-                        // Modifying shell command structure from a hook is
-                        // not safely supported.  Block the call so the
-                        // hook's policy intent is not silently bypassed.
-                        return Ok(Self::failure_response(
-                            failure_call_id,
-                            payload_outputs_custom,
-                            FunctionCallError::ToolCallBlocked(
-                                "pre_tool_use hook returned Modify for local_shell which is not supported; blocking execution".to_string(),
-                            ),
-                        ));
-                    }
-                }
             }
         }
 
@@ -245,31 +258,50 @@ impl ToolRouter {
             )),
         };
 
-        // --- PostToolUse hook (fire-and-forget, does not alter the result) ---
-        // Spawned as a background task so that slow/hung post-hooks do not
-        // add latency to the tool response path.
+        // --- PostToolUse hook ---
+        // Awaited inline so hooks can inspect/modify tool output and inject
+        // system messages.  PostToolUse is non-blockable so a Block decision
+        // from the hook is treated as a warning.
         if let Ok(ref response) = result {
             let tool_output = Self::extract_output_text(response);
-            let hooks = session.hooks().clone();
-            let cwd = turn.cwd.clone();
-            let conversation_id = session.conversation_id;
-            let permission_mode = turn.approval_policy.to_string();
-            tokio::spawn(async move {
-                hooks
-                    .dispatch(HookPayload::new(
-                        conversation_id,
-                        cwd,
-                        HookEvent::PostToolUse {
-                            event: HookEventPostToolUse {
-                                tool_name: hook_name,
-                                tool_output,
-                            },
+            let post_outcome = session
+                .hooks()
+                .dispatch(HookPayload::new(
+                    session.conversation_id,
+                    turn.cwd.clone(),
+                    HookEvent::PostToolUse {
+                        event: HookEventPostToolUse {
+                            tool_name: hook_name,
+                            tool_output,
                         },
-                        None,
-                        permission_mode,
-                    ))
+                    },
+                    None,
+                    turn.approval_policy.to_string(),
+                ))
+                .await;
+
+            // Emit Warning events for any system messages from post-tool hooks.
+            for msg in &post_outcome.system_messages {
+                session
+                    .send_event(
+                        &turn,
+                        codex_protocol::protocol::EventMsg::Warning(
+                            codex_protocol::protocol::WarningEvent {
+                                message: format!("[hook] {msg}"),
+                            },
+                        ),
+                    )
                     .await;
-            });
+            }
+
+            // PostToolUse is non-blockable; a Block decision is informational only.
+            if let EffectAction::Block { reason } = &post_outcome.action {
+                tracing::warn!("post_tool_use hook returned block (non-blocking): {reason}");
+            }
+
+            if post_outcome.suppress_output {
+                tracing::info!("post_tool_use hook requested output suppression");
+            }
         }
 
         result

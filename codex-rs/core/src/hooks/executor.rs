@@ -8,7 +8,9 @@ use tokio::io::AsyncWriteExt;
 
 use super::types::Hook;
 use super::types::HookOutcome;
+use super::types::HookOutputMeta;
 use super::types::HookPayload;
+use super::types::HookResult;
 
 /// Maximum bytes to read from a hook command's stdout to prevent unbounded memory usage.
 const MAX_STDOUT_BYTES: usize = 1_048_576; // 1MB
@@ -16,7 +18,7 @@ const MAX_STDOUT_BYTES: usize = 1_048_576; // 1MB
 /// Maximum bytes to read from a hook command's stderr to prevent unbounded memory usage.
 const MAX_STDERR_BYTES: usize = 1_048_576; // 1MB
 
-/// Decision returned by a hook command.
+/// Decision returned by a hook command (Claude Code compatible).
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum HookDecision {
@@ -25,25 +27,76 @@ pub(super) enum HookDecision {
     Modify,
 }
 
-/// Result structure returned by a hook command via stdout JSON.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(super) struct HookCommandResult {
-    pub decision: HookDecision,
+/// Event-specific output from a hook command.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct HookSpecificOutput {
     #[serde(default)]
-    pub message: Option<String>,
+    #[allow(dead_code)] // Used in P2-2.2 (HookAggregateEffect)
+    pub hook_event_name: Option<String>,
     #[serde(default)]
-    pub content: Option<String>,
+    #[allow(dead_code)] // Used in P2-2.2 (HookAggregateEffect)
+    pub permission_decision: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)] // Used in P2-2.2 (HookAggregateEffect)
+    pub permission_decision_reason: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)] // Used in P2-2.2 (HookAggregateEffect)
+    pub updated_input: Option<serde_json::Value>,
+    #[serde(default)]
+    #[allow(dead_code)] // Used in P2-2.2 (HookAggregateEffect)
+    pub additional_context: Option<String>,
 }
 
-impl From<HookCommandResult> for HookOutcome {
-    fn from(result: HookCommandResult) -> Self {
-        match result.decision {
+/// Result structure returned by a hook command via stdout JSON.
+///
+/// Supports both the simple format (`{"decision":"proceed"}`) and the
+/// full Claude Code format with additional metadata fields.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct HookCommandOutput {
+    /// Hook decision: proceed, block, or modify.
+    #[serde(default = "default_decision")]
+    pub decision: HookDecision,
+    /// Reason for the decision (displayed to user on block).
+    /// Aliases: `message` (legacy) or `reason` (Claude Code).
+    #[serde(default, alias = "message")]
+    pub reason: Option<String>,
+    /// Modified content (required when decision=modify).
+    #[serde(default)]
+    pub content: Option<String>,
+    /// Override the stop reason for Stop events.
+    #[serde(default)]
+    pub stop_reason: Option<String>,
+    /// Whether to suppress the tool output from display.
+    #[serde(default)]
+    pub suppress_output: Option<bool>,
+    /// System message to inject into the conversation.
+    #[serde(default)]
+    pub system_message: Option<String>,
+    /// Event-specific hook output.
+    #[serde(default)]
+    #[allow(dead_code)] // Used in P2-2.2 (HookAggregateEffect)
+    pub hook_specific_output: Option<HookSpecificOutput>,
+}
+
+fn default_decision() -> HookDecision {
+    HookDecision::Proceed
+}
+
+impl From<HookCommandOutput> for HookResult {
+    fn from(output: HookCommandOutput) -> Self {
+        let meta = HookOutputMeta {
+            system_message: output.system_message,
+            stop_reason: output.stop_reason,
+            suppress_output: output.suppress_output,
+        };
+        let outcome = match output.decision {
             HookDecision::Proceed => HookOutcome::Proceed,
             HookDecision::Block => HookOutcome::Block {
-                message: result.message,
+                message: output.reason,
             },
-            HookDecision::Modify => match result.content {
+            HookDecision::Modify => match output.content {
                 Some(content) => HookOutcome::Modify { content },
                 None => {
                     tracing::warn!(
@@ -57,7 +110,8 @@ impl From<HookCommandResult> for HookOutcome {
                     }
                 }
             },
-        }
+        };
+        Self { outcome, meta }
     }
 }
 
@@ -82,7 +136,7 @@ pub(super) fn command_hook(argv: Vec<String>, timeout: Duration) -> Hook {
             Box::pin(async move {
                 let Some(mut command) = super::registry::command_from_argv(&argv) else {
                     tracing::warn!("hook command argv is empty, skipping");
-                    return HookOutcome::Proceed;
+                    return HookOutcome::Proceed.into();
                 };
 
                 // Set up working directory, stdio, and environment variables
@@ -102,21 +156,21 @@ pub(super) fn command_hook(argv: Vec<String>, timeout: Duration) -> Hook {
                     Ok(child) => child,
                     Err(err) => {
                         tracing::warn!("failed to spawn hook command: {err}");
-                        return HookOutcome::Proceed;
+                        return HookOutcome::Proceed.into();
                     }
                 };
 
                 let Some(mut stdin) = child.stdin.take() else {
                     tracing::warn!("hook child process has no stdin handle");
-                    return HookOutcome::Proceed;
+                    return HookOutcome::Proceed.into();
                 };
                 let Some(mut stdout) = child.stdout.take() else {
                     tracing::warn!("hook child process has no stdout handle");
-                    return HookOutcome::Proceed;
+                    return HookOutcome::Proceed.into();
                 };
                 let Some(mut stderr) = child.stderr.take() else {
                     tracing::warn!("hook child process has no stderr handle");
-                    return HookOutcome::Proceed;
+                    return HookOutcome::Proceed.into();
                 };
 
                 // Serialize payload to JSON before entering the timed block.
@@ -124,7 +178,7 @@ pub(super) fn command_hook(argv: Vec<String>, timeout: Duration) -> Hook {
                     Ok(json) => json,
                     Err(err) => {
                         tracing::warn!("failed to serialize hook payload: {err}");
-                        return HookOutcome::Proceed;
+                        return HookOutcome::Proceed.into();
                     }
                 };
 
@@ -221,7 +275,7 @@ pub(super) fn command_hook(argv: Vec<String>, timeout: Duration) -> Hook {
                         let _ = child.kill().await;
                         return HookOutcome::Block {
                             message: Some("hook timed out".to_string()),
-                        };
+                        }.into();
                     }
                     Ok(data) => data,
                 };
@@ -234,13 +288,13 @@ pub(super) fn command_hook(argv: Vec<String>, timeout: Duration) -> Hook {
                     Ok(Ok(status)) => status,
                     Ok(Err(err)) => {
                         tracing::warn!("failed to wait for hook command: {err}");
-                        return HookOutcome::Proceed;
+                        return HookOutcome::Proceed.into();
                     }
                     Err(_elapsed) => {
                         let _ = child.kill().await;
                         return HookOutcome::Block {
                             message: Some("hook timed out".to_string()),
-                        };
+                        }.into();
                     }
                 };
 
@@ -258,7 +312,7 @@ pub(super) fn command_hook(argv: Vec<String>, timeout: Duration) -> Hook {
                         };
                         return HookOutcome::Block {
                             message: Some(message),
-                        };
+                        }.into();
                     }
                     // Non-blocking error (or exit 2 on non-blockable event): log and continue
                     if !stderr_string.is_empty() {
@@ -270,12 +324,12 @@ pub(super) fn command_hook(argv: Vec<String>, timeout: Duration) -> Hook {
                             "hook exited with code {code} (non-blocking)"
                         );
                     }
-                    return HookOutcome::Proceed;
+                    return HookOutcome::Proceed.into();
                 }
 
                 // Exit code 0: parse stdout or default to Proceed
                 if stdout_bytes.is_empty() {
-                    return HookOutcome::Proceed;
+                    return HookOutcome::Proceed.into();
                 }
 
                 // If stdout was truncated, the JSON is likely corrupted.
@@ -286,14 +340,14 @@ pub(super) fn command_hook(argv: Vec<String>, timeout: Duration) -> Hook {
                         message: Some(
                             "hook stdout exceeded size limit; output truncated and cannot be trusted".to_string(),
                         ),
-                    };
+                    }.into();
                 }
 
-                match serde_json::from_slice::<HookCommandResult>(&stdout_bytes) {
-                    Ok(result) => result.into(),
+                match serde_json::from_slice::<HookCommandOutput>(&stdout_bytes) {
+                    Ok(output) => output.into(),
                     Err(err) => {
-                        tracing::warn!("failed to parse hook command result: {err}");
-                        HookOutcome::Proceed
+                        tracing::warn!("failed to parse hook command output: {err}");
+                        HookOutcome::Proceed.into()
                     }
                 }
             })
@@ -307,34 +361,109 @@ mod tests {
     use serde_json::json;
 
     use super::super::types::HookOutcome;
-    use super::HookCommandResult;
+    use super::super::types::HookResult;
+    use super::HookCommandOutput;
     use super::HookDecision;
 
     #[test]
-    fn test_hook_command_result_deserialize_proceed() {
+    fn test_hook_command_output_deserialize_proceed() {
         let json = json!({"decision": "proceed"});
-        let result: HookCommandResult = serde_json::from_value(json).unwrap();
-        assert_eq!(result.decision, HookDecision::Proceed);
-        assert_eq!(result.message, None);
-        assert_eq!(result.content, None);
+        let output: HookCommandOutput = serde_json::from_value(json).unwrap();
+        assert_eq!(output.decision, HookDecision::Proceed);
+        assert_eq!(output.reason, None);
+        assert_eq!(output.content, None);
     }
 
     #[test]
-    fn test_hook_command_result_deserialize_block() {
-        let json = json!({"decision": "block", "message": "denied"});
-        let result: HookCommandResult = serde_json::from_value(json).unwrap();
-        assert_eq!(result.decision, HookDecision::Block);
-        assert_eq!(result.message, Some("denied".to_string()));
-        assert_eq!(result.content, None);
+    fn test_hook_command_output_deserialize_block() {
+        let json = json!({"decision": "block", "reason": "denied"});
+        let output: HookCommandOutput = serde_json::from_value(json).unwrap();
+        assert_eq!(output.decision, HookDecision::Block);
+        assert_eq!(output.reason, Some("denied".to_string()));
+        assert_eq!(output.content, None);
     }
 
     #[test]
-    fn test_hook_command_result_deserialize_modify() {
+    fn test_hook_command_output_deserialize_modify() {
         let json = json!({"decision": "modify", "content": "new text"});
-        let result: HookCommandResult = serde_json::from_value(json).unwrap();
-        assert_eq!(result.decision, HookDecision::Modify);
-        assert_eq!(result.message, None);
-        assert_eq!(result.content, Some("new text".to_string()));
+        let output: HookCommandOutput = serde_json::from_value(json).unwrap();
+        assert_eq!(output.decision, HookDecision::Modify);
+        assert_eq!(output.reason, None);
+        assert_eq!(output.content, Some("new text".to_string()));
+    }
+
+    #[test]
+    fn test_hook_command_output_deserialize_camel_case() {
+        // Claude Code format uses camelCase
+        let json = json!({
+            "decision": "block",
+            "reason": "permission denied",
+            "stopReason": "user_cancelled",
+            "suppressOutput": true,
+            "systemMessage": "Hook blocked this action"
+        });
+        let output: HookCommandOutput = serde_json::from_value(json).unwrap();
+        assert_eq!(output.decision, HookDecision::Block);
+        assert_eq!(output.reason, Some("permission denied".to_string()));
+        assert_eq!(output.stop_reason, Some("user_cancelled".to_string()));
+        assert_eq!(output.suppress_output, Some(true));
+        assert_eq!(
+            output.system_message,
+            Some("Hook blocked this action".to_string())
+        );
+    }
+
+    #[test]
+    fn test_hook_command_output_message_alias_for_reason() {
+        // Legacy "message" field should be aliased to "reason"
+        let json = json!({"decision": "block", "message": "denied by policy"});
+        let output: HookCommandOutput = serde_json::from_value(json).unwrap();
+        assert_eq!(output.decision, HookDecision::Block);
+        assert_eq!(output.reason, Some("denied by policy".to_string()));
+    }
+
+    #[test]
+    fn test_hook_command_output_hook_specific_output() {
+        let json = json!({
+            "decision": "modify",
+            "content": "new content",
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow",
+                "permissionDecisionReason": "safe command",
+                "updatedInput": {"command": "ls -la"},
+                "additionalContext": "vetted by security"
+            }
+        });
+        let output: HookCommandOutput = serde_json::from_value(json).unwrap();
+        assert_eq!(output.decision, HookDecision::Modify);
+        assert_eq!(output.content, Some("new content".to_string()));
+
+        let specific = output.hook_specific_output.expect("should have specific output");
+        assert_eq!(specific.hook_event_name, Some("PreToolUse".to_string()));
+        assert_eq!(specific.permission_decision, Some("allow".to_string()));
+        assert_eq!(
+            specific.permission_decision_reason,
+            Some("safe command".to_string())
+        );
+        assert_eq!(
+            specific.updated_input,
+            Some(json!({"command": "ls -la"}))
+        );
+        assert_eq!(
+            specific.additional_context,
+            Some("vetted by security".to_string())
+        );
+    }
+
+    #[test]
+    fn test_hook_command_output_empty_json_defaults_to_proceed() {
+        // Empty JSON should default to Proceed (via default_decision)
+        let json = json!({});
+        let output: HookCommandOutput = serde_json::from_value(json).unwrap();
+        assert_eq!(output.decision, HookDecision::Proceed);
+        assert_eq!(output.reason, None);
+        assert_eq!(output.content, None);
     }
 
     // ---- command_hook() integration tests (Unix only) ----
@@ -412,8 +541,8 @@ mod tests {
                 ],
                 Duration::from_secs(5),
             );
-            let outcome = hook.execute(&test_payload()).await;
-            assert_eq!(outcome, HookOutcome::Proceed);
+            let result = hook.execute(&test_payload()).await;
+            assert_eq!(result.outcome, HookOutcome::Proceed);
         }
 
         #[tokio::test]
@@ -426,8 +555,8 @@ mod tests {
                 ],
                 Duration::from_secs(5),
             );
-            let outcome = hook.execute(&test_payload()).await;
-            assert_eq!(outcome, HookOutcome::Proceed);
+            let result = hook.execute(&test_payload()).await;
+            assert_eq!(result.outcome, HookOutcome::Proceed);
         }
 
         #[tokio::test]
@@ -441,9 +570,9 @@ mod tests {
                 ],
                 Duration::from_secs(5),
             );
-            let outcome = hook.execute(&test_payload()).await;
+            let result = hook.execute(&test_payload()).await;
             assert_eq!(
-                outcome,
+                result.outcome,
                 HookOutcome::Block {
                     message: Some("denied by policy".to_string())
                 }
@@ -461,9 +590,9 @@ mod tests {
                 ],
                 Duration::from_secs(5),
             );
-            let outcome = hook.execute(&test_payload()).await;
+            let result = hook.execute(&test_payload()).await;
             assert_eq!(
-                outcome,
+                result.outcome,
                 HookOutcome::Modify {
                     content: "new content".to_string()
                 }
@@ -480,8 +609,8 @@ mod tests {
                 ],
                 Duration::from_secs(5),
             );
-            let outcome = hook.execute(&blockable_test_payload()).await;
-            match outcome {
+            let result = hook.execute(&blockable_test_payload()).await;
+            match result.outcome {
                 HookOutcome::Block { message } => {
                     let msg = message.expect("should have error message");
                     assert!(
@@ -503,8 +632,8 @@ mod tests {
                 ],
                 Duration::from_secs(5),
             );
-            let outcome = hook.execute(&blockable_test_payload()).await;
-            match outcome {
+            let result = hook.execute(&blockable_test_payload()).await;
+            match result.outcome {
                 HookOutcome::Block { message } => {
                     let msg = message.expect("should have error message");
                     assert!(
@@ -527,8 +656,8 @@ mod tests {
                 ],
                 Duration::from_secs(5),
             );
-            let outcome = hook.execute(&test_payload()).await;
-            assert_eq!(outcome, HookOutcome::Proceed);
+            let result = hook.execute(&test_payload()).await;
+            assert_eq!(result.outcome, HookOutcome::Proceed);
         }
 
         #[tokio::test]
@@ -542,8 +671,8 @@ mod tests {
                 ],
                 Duration::from_secs(5),
             );
-            let outcome = hook.execute(&test_payload()).await;
-            assert_eq!(outcome, HookOutcome::Proceed);
+            let result = hook.execute(&test_payload()).await;
+            assert_eq!(result.outcome, HookOutcome::Proceed);
         }
 
         #[tokio::test]
@@ -557,8 +686,8 @@ mod tests {
                 ],
                 Duration::from_secs(5),
             );
-            let outcome = hook.execute(&test_payload()).await;
-            assert_eq!(outcome, HookOutcome::Proceed);
+            let result = hook.execute(&test_payload()).await;
+            assert_eq!(result.outcome, HookOutcome::Proceed);
         }
 
         #[tokio::test]
@@ -571,7 +700,8 @@ mod tests {
                 ],
                 Duration::from_millis(100), // Very short timeout
             );
-            let outcome = hook.execute(&test_payload()).await;
+            let result = hook.execute(&test_payload()).await;
+            let outcome = result.outcome;
             assert_eq!(
                 outcome,
                 HookOutcome::Block {
@@ -590,7 +720,8 @@ mod tests {
                 ],
                 Duration::from_secs(5),
             );
-            let outcome = hook.execute(&test_payload()).await;
+            let result = hook.execute(&test_payload()).await;
+            let outcome = result.outcome;
             // Invalid JSON → fail-open → Proceed
             assert_eq!(outcome, HookOutcome::Proceed);
         }
@@ -601,7 +732,8 @@ mod tests {
                 vec!["/nonexistent/command/path/xxxxx".to_string()],
                 Duration::from_secs(5),
             );
-            let outcome = hook.execute(&test_payload()).await;
+            let result = hook.execute(&test_payload()).await;
+            let outcome = result.outcome;
             // Spawn failure → fail-open → Proceed
             assert_eq!(outcome, HookOutcome::Proceed);
         }
@@ -609,8 +741,8 @@ mod tests {
         #[tokio::test]
         async fn command_hook_empty_argv_returns_proceed() {
             let hook = command_hook(vec![], Duration::from_secs(5));
-            let outcome = hook.execute(&test_payload()).await;
-            assert_eq!(outcome, HookOutcome::Proceed);
+            let result = hook.execute(&test_payload()).await;
+            assert_eq!(result.outcome, HookOutcome::Proceed);
         }
 
         #[tokio::test]
@@ -627,8 +759,8 @@ mod tests {
                 ],
                 Duration::from_secs(5),
             );
-            let outcome = hook.execute(&test_payload()).await;
-            assert_eq!(outcome, HookOutcome::Proceed);
+            let result = hook.execute(&test_payload()).await;
+            assert_eq!(result.outcome, HookOutcome::Proceed);
         }
 
         #[tokio::test]
@@ -644,7 +776,8 @@ mod tests {
                 Duration::from_secs(5),
             );
             // test_payload() sets cwd to /tmp
-            let outcome = hook.execute(&test_payload()).await;
+            let result = hook.execute(&test_payload()).await;
+            let outcome = result.outcome;
             // pwd outputs the working directory; since it's not valid JSON,
             // the executor falls through to Proceed (fail-open on invalid JSON).
             // The important thing is that it doesn't fail to spawn, proving
@@ -661,7 +794,8 @@ mod tests {
                 ],
                 Duration::from_secs(5),
             );
-            let outcome = hook.execute(&test_payload()).await;
+            let result = hook.execute(&test_payload()).await;
+            let outcome = result.outcome;
             match outcome {
                 HookOutcome::Block { message } => {
                     let msg = message.expect("should have cwd message");
@@ -676,59 +810,79 @@ mod tests {
     }
 
     #[test]
-    fn test_hook_command_result_to_outcome() {
-        let result = HookCommandResult {
+    fn test_hook_command_output_to_outcome() {
+        let output = HookCommandOutput {
             decision: HookDecision::Proceed,
-            message: None,
+            reason: None,
             content: None,
+            stop_reason: None,
+            suppress_output: None,
+            system_message: None,
+            hook_specific_output: None,
         };
-        assert_eq!(HookOutcome::from(result), HookOutcome::Proceed);
+        assert_eq!(HookResult::from(output).outcome, HookOutcome::Proceed);
 
-        let result = HookCommandResult {
+        let output = HookCommandOutput {
             decision: HookDecision::Block,
-            message: Some("blocked".to_string()),
+            reason: Some("blocked".to_string()),
             content: None,
+            stop_reason: None,
+            suppress_output: None,
+            system_message: None,
+            hook_specific_output: None,
         };
         assert_eq!(
-            HookOutcome::from(result),
+            HookResult::from(output).outcome,
             HookOutcome::Block {
                 message: Some("blocked".to_string())
             }
         );
 
-        let result = HookCommandResult {
+        let output = HookCommandOutput {
             decision: HookDecision::Modify,
-            message: None,
+            reason: None,
             content: Some("modified content".to_string()),
+            stop_reason: None,
+            suppress_output: None,
+            system_message: None,
+            hook_specific_output: None,
         };
         assert_eq!(
-            HookOutcome::from(result),
+            HookResult::from(output).outcome,
             HookOutcome::Modify {
                 content: "modified content".to_string()
             }
         );
 
         // Modify with explicit empty content is allowed
-        let result = HookCommandResult {
+        let output = HookCommandOutput {
             decision: HookDecision::Modify,
-            message: None,
+            reason: None,
             content: Some(String::new()),
+            stop_reason: None,
+            suppress_output: None,
+            system_message: None,
+            hook_specific_output: None,
         };
         assert_eq!(
-            HookOutcome::from(result),
+            HookResult::from(output).outcome,
             HookOutcome::Modify {
                 content: String::new()
             }
         );
 
         // Modify without content field → Block (malformed response)
-        let result = HookCommandResult {
+        let output = HookCommandOutput {
             decision: HookDecision::Modify,
-            message: None,
+            reason: None,
             content: None,
+            stop_reason: None,
+            suppress_output: None,
+            system_message: None,
+            hook_specific_output: None,
         };
         assert!(
-            matches!(HookOutcome::from(result), HookOutcome::Block { .. }),
+            matches!(HookResult::from(output).outcome, HookOutcome::Block { .. }),
             "modify without content should be treated as Block"
         );
     }
