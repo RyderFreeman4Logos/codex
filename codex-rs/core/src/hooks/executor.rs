@@ -114,16 +114,16 @@ pub(super) struct HookCommandOutput {
     #[serde(default)]
     pub content: Option<String>,
     /// Override the stop reason for Stop events.
-    #[serde(default)]
+    #[serde(default, alias = "stop_reason")]
     pub stop_reason: Option<String>,
     /// Whether to suppress the tool output from display.
-    #[serde(default)]
+    #[serde(default, alias = "suppress_output")]
     pub suppress_output: Option<bool>,
     /// System message to inject into the conversation.
-    #[serde(default)]
+    #[serde(default, alias = "system_message")]
     pub system_message: Option<String>,
     /// Event-specific hook output (Claude Code protocol extension).
-    #[serde(default)]
+    #[serde(default, alias = "hook_specific_output")]
     pub hook_specific_output: Option<HookSpecificOutput>,
 }
 

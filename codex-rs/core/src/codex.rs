@@ -3986,7 +3986,8 @@ pub(crate) async fn run_turn(
 
                 if !needs_follow_up {
                     last_agent_message = sampling_request_last_agent_message;
-                    sess.hooks()
+                    let after_agent_effect = sess
+                        .hooks()
                         .dispatch(crate::hooks::HookPayload::new(
                             sess.conversation_id,
                             turn_context.cwd.clone(),
@@ -4002,6 +4003,19 @@ pub(crate) async fn run_turn(
                             turn_context.approval_policy.to_string(),
                         ))
                         .await;
+
+                    for msg in &after_agent_effect.system_messages {
+                        sess.send_event(
+                            &turn_context,
+                            codex_protocol::protocol::EventMsg::Warning(
+                                codex_protocol::protocol::WarningEvent {
+                                    message: format!("[hook] {msg}"),
+                                },
+                            ),
+                        )
+                        .await;
+                    }
+
                     break;
                 }
                 continue;
