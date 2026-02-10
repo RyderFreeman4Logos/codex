@@ -249,27 +249,33 @@ pub(super) fn hook_from_entry(entry: &HookEntryToml) -> Hook {
             matcher: None,
         },
         Some(pattern) => {
-            // Pre-compile the regex once and share it via Arc
+            // Pre-compile the regex once and share it via Arc.
+            // On failure, use a never-matching regex so the hook is
+            // effectively disabled (also prevents once-slot consumption).
             let regex = match Regex::new(pattern) {
-                Ok(re) => Some(Arc::new(re)),
+                Ok(re) => Arc::new(re),
                 Err(e) => {
                     tracing::warn!(
                         pattern = %pattern,
                         error = %e,
                         "Invalid regex pattern in hook matcher, hook will not match any events"
                     );
-                    None
+                    // Use a never-matching regex so the hook is effectively
+                    // disabled at both registry (matches_event) and closure level.
+                    match Regex::new(r"[^\s\S]") {
+                        Ok(re) => Arc::new(re),
+                        Err(_) => unreachable!("static never-match regex is always valid"),
+                    }
                 }
             };
 
-            let matcher_for_struct = regex.clone();
+            let matcher_for_struct = Some(regex.clone());
             Hook {
                 func: Arc::new(move |payload| {
                     let matchable = matcher_field_for_event(&payload.hook_event);
 
                     if let Some(name) = matchable {
-                        // If regex compilation failed or doesn't match, skip execution
-                        if regex.as_ref().is_some_and(|re| re.is_match(name)) {
+                        if regex.is_match(name) {
                             inner.func.clone()(payload)
                         } else {
                             Box::pin(async { super::types::HookResult::default() })

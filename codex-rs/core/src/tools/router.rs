@@ -272,7 +272,7 @@ impl ToolRouter {
             Err(err) => {
                 dispatched_failure = true;
                 // Dispatch PostToolUseFailure hook (non-blockable).
-                session
+                let failure_effect = session
                     .hooks()
                     .dispatch(HookPayload::new(
                         session.conversation_id,
@@ -287,6 +287,18 @@ impl ToolRouter {
                         turn.approval_policy.to_string(),
                     ))
                     .await;
+                for msg in &failure_effect.system_messages {
+                    session
+                        .send_event(
+                            &turn,
+                            codex_protocol::protocol::EventMsg::Warning(
+                                codex_protocol::protocol::WarningEvent {
+                                    message: format!("[hook] {msg}"),
+                                },
+                            ),
+                        )
+                        .await;
+                }
 
                 Ok(Self::failure_response(
                     failure_call_id,
@@ -304,7 +316,7 @@ impl ToolRouter {
             && let Some(error_msg) = Self::extract_tool_error(response)
         {
             dispatched_failure = true;
-            session
+            let failure_effect = session
                 .hooks()
                 .dispatch(HookPayload::new(
                     session.conversation_id,
@@ -319,6 +331,18 @@ impl ToolRouter {
                     turn.approval_policy.to_string(),
                 ))
                 .await;
+            for msg in &failure_effect.system_messages {
+                session
+                    .send_event(
+                        &turn,
+                        codex_protocol::protocol::EventMsg::Warning(
+                            codex_protocol::protocol::WarningEvent {
+                                message: format!("[hook] {msg}"),
+                            },
+                        ),
+                    )
+                    .await;
+            }
         }
 
         // --- PostToolUse hook (only for successful invocations) ---
