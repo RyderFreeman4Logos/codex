@@ -239,12 +239,14 @@ pub(super) fn hook_from_entry(entry: &HookEntryToml) -> Hook {
             is_async,
             once,
             status_message,
+            matcher: None,
         },
         Some(pattern) if pattern.is_empty() || pattern == "*" => Hook {
             func: inner.func,
             is_async,
             once,
             status_message,
+            matcher: None,
         },
         Some(pattern) => {
             // Pre-compile the regex once and share it via Arc
@@ -260,6 +262,7 @@ pub(super) fn hook_from_entry(entry: &HookEntryToml) -> Hook {
                 }
             };
 
+            let matcher_for_struct = regex.clone();
             Hook {
                 func: Arc::new(move |payload| {
                     let matchable = matcher_field_for_event(&payload.hook_event);
@@ -279,6 +282,7 @@ pub(super) fn hook_from_entry(entry: &HookEntryToml) -> Hook {
                 is_async,
                 once,
                 status_message,
+                matcher: matcher_for_struct,
             }
         }
     }

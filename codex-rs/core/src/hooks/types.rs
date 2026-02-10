@@ -22,6 +22,10 @@ pub(crate) struct Hook {
     pub(crate) once: bool,
     /// Optional status message for UI display during execution.
     pub(crate) status_message: Option<String>,
+    /// Pre-compiled matcher regex (if any). Used by the registry to check
+    /// event matching *before* marking once-hooks as fired, so that a
+    /// non-matching event does not consume the once slot.
+    pub(crate) matcher: Option<Arc<regex::Regex>>,
 }
 
 impl Default for Hook {
@@ -31,6 +35,7 @@ impl Default for Hook {
             is_async: false,
             once: false,
             status_message: None,
+            matcher: None,
         }
     }
 }
@@ -38,6 +43,22 @@ impl Default for Hook {
 impl Hook {
     pub(super) async fn execute(&self, payload: &HookPayload) -> HookResult {
         (self.func)(payload).await
+    }
+
+    /// Check if this hook's matcher pattern matches the given event.
+    /// Returns `true` if the hook should execute (no matcher, or matcher matches).
+    pub(crate) fn matches_event(&self, event: &HookEvent) -> bool {
+        let Some(ref regex) = self.matcher else {
+            return true; // No matcher = always matches
+        };
+        match event {
+            HookEvent::PreToolUse { event } => regex.is_match(&event.tool_name),
+            HookEvent::PostToolUse { event } => regex.is_match(&event.tool_name),
+            HookEvent::PostToolUseFailure { event } => regex.is_match(&event.tool_name),
+            HookEvent::SessionStart { event } => regex.is_match(&event.source),
+            HookEvent::SessionEnd { event } => regex.is_match(&event.reason),
+            HookEvent::AfterAgent { .. } => true, // No matchable field
+        }
     }
 }
 

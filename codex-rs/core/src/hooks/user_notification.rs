@@ -53,6 +53,7 @@ pub(super) fn notify_hook(argv: Vec<String>) -> Hook {
         is_async: false,
         once: false,
         status_message: None,
+        matcher: None,
         func: Arc::new(move |payload: &HookPayload| {
             let argv = Arc::clone(&argv);
             Box::pin(async move {

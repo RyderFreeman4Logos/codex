@@ -196,6 +196,7 @@ pub(super) fn command_hook(command: super::config::CommandSpec, timeout: Duratio
         is_async: false,
         once: false,
         status_message: None,
+        matcher: None,
         func: Arc::new(move |payload: &HookPayload| {
             let command_spec = command.clone();
             let payload = payload.clone();

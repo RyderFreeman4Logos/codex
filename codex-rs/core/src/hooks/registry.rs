@@ -187,6 +187,14 @@ impl Hooks {
         let mut async_hooks_with_idx = Vec::new();
 
         for (idx, hook) in hooks.iter().enumerate() {
+            // Check matcher BEFORE once tracking — a non-matching event must
+            // not consume the once slot so the hook can still fire later when
+            // a matching event arrives.
+            if !hook.matches_event(&hook_payload.hook_event) {
+                tracing::debug!(event = %event_name, hook_idx = idx, "Skipping hook (matcher did not match)");
+                continue;
+            }
+
             // Check if this is a once-hook that has already fired.
             if hook.once {
                 let once_key = format!("{event_name}:{idx}");
@@ -199,7 +207,7 @@ impl Hooks {
                     tracing::debug!(event = %event_name, hook_idx = idx, "Skipping once-hook (already fired)");
                     continue;
                 }
-                // Mark as fired before execution.
+                // Mark as fired — only reached after matcher confirmed a match.
                 fired.insert(once_key);
             }
 
@@ -458,6 +466,7 @@ mod tests {
             is_async: false,
             once: false,
             status_message: None,
+        matcher: None,
             func: Arc::new(move |_| {
                 let calls = Arc::clone(&calls);
                 let outcome = outcome.clone();
@@ -687,6 +696,7 @@ mod tests {
             is_async: false,
             once: false,
             status_message: None,
+        matcher: None,
             func: Arc::new(move |payload: &HookPayload| {
                 let payload_path_arg = payload_path_arg.clone();
                 Box::pin(async move {
@@ -741,6 +751,7 @@ mod tests {
             is_async: false,
             once: false,
             status_message: None,
+        matcher: None,
             func: Arc::new(move |payload: &HookPayload| {
                 let payload_path_arg = payload_path_arg.clone();
                 let script_path_arg = script_path_arg.clone();
@@ -836,6 +847,7 @@ mod tests {
             is_async: false,
             once: false,
             status_message: None,
+        matcher: None,
             func: Arc::new(|_| {
                     Box::pin(async {
                         HookResult::from(HookOutcome::Modify {
@@ -848,12 +860,14 @@ mod tests {
             is_async: false,
             once: false,
             status_message: None,
+        matcher: None,
             func: Arc::new(|_| Box::pin(async { HookResult::from(HookOutcome::Proceed) })),
             },
             Hook {
             is_async: false,
             once: false,
             status_message: None,
+        matcher: None,
             func: Arc::new(|_| {
                     Box::pin(async {
                         HookResult::from(HookOutcome::Modify {
@@ -881,6 +895,7 @@ mod tests {
             is_async: false,
             once: false,
             status_message: None,
+        matcher: None,
             func: Arc::new(|_| {
                     Box::pin(async {
                         HookResult::from(HookOutcome::Modify {
@@ -909,6 +924,7 @@ mod tests {
             is_async: false,
             once: false,
             status_message: None,
+        matcher: None,
             func: Arc::new(|_| Box::pin(async { HookResult::from(HookOutcome::Proceed) })),
             },
         ]);
@@ -925,6 +941,7 @@ mod tests {
             is_async: false,
             once: false,
             status_message: None,
+        matcher: None,
             func: Arc::new(|_| {
                 Box::pin(async {
                     HookResult::from(HookOutcome::Block {
@@ -950,6 +967,7 @@ mod tests {
             is_async: false,
             once: false,
             status_message: None,
+        matcher: None,
             func: Arc::new(|_| {
                 Box::pin(async { HookResult::from(HookOutcome::Block { message: None }) })
             }),
@@ -983,6 +1001,7 @@ mod tests {
             is_async: false,
             once: false,
             status_message: None,
+        matcher: None,
             func: Arc::new(move |_| {
                         let barrier = Arc::clone(&barrier);
                         let calls = Arc::clone(&calls);
@@ -1019,6 +1038,7 @@ mod tests {
             is_async: false,
             once: false,
             status_message: None,
+        matcher: None,
             func: Arc::new(|_| {
                     Box::pin(async {
                         HookResult::from(HookOutcome::Block {
@@ -1031,6 +1051,7 @@ mod tests {
             is_async: false,
             once: false,
             status_message: None,
+        matcher: None,
             func: Arc::new(|_| {
                     Box::pin(async {
                         HookResult::from(HookOutcome::Block {
@@ -1061,6 +1082,7 @@ mod tests {
             is_async: false,
             once: false,
             status_message: None,
+        matcher: None,
             func: Arc::new(|_| {
                     Box::pin(async {
                         HookResult {
@@ -1079,6 +1101,7 @@ mod tests {
             is_async: false,
             once: false,
             status_message: None,
+        matcher: None,
             func: Arc::new(|_| {
                     Box::pin(async {
                         HookResult {
@@ -1113,6 +1136,7 @@ mod tests {
             is_async: true,
             once: false,
             status_message: None,
+        matcher: None,
             func: Arc::new(|_| {
                 Box::pin(async {
                     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1141,6 +1165,7 @@ mod tests {
             is_async: true,
             once: false,
             status_message: None,
+        matcher: None,
             func: Arc::new(|_| {
                 Box::pin(async {
                     HookResult::from(HookOutcome::Block {
@@ -1154,6 +1179,7 @@ mod tests {
             is_async: true,
             once: false,
             status_message: None,
+        matcher: None,
             func: Arc::new(|_| {
                 Box::pin(async {
                     HookResult::from(HookOutcome::Modify {
@@ -1178,6 +1204,7 @@ mod tests {
             is_async: false,
             once: false,
             status_message: None,
+        matcher: None,
             func: Arc::new(|_| {
                 Box::pin(async {
                     HookResult::from(HookOutcome::Modify {
@@ -1191,6 +1218,7 @@ mod tests {
             is_async: true,
             once: false,
             status_message: None,
+        matcher: None,
             func: Arc::new(|_| {
                 Box::pin(async {
                     HookResult::from(HookOutcome::Block {
@@ -1217,6 +1245,7 @@ mod tests {
             is_async: false,
             once: true,
             status_message: None,
+        matcher: None,
             func: Arc::new(move |_| {
                 let calls = Arc::clone(&calls_clone);
                 Box::pin(async move {
@@ -1266,6 +1295,7 @@ mod tests {
             is_async: false,
             once: false,
             status_message: Some("Checking permissions...".to_string()),
+            matcher: None,
             func: Arc::new(|_| Box::pin(async { HookResult::from(HookOutcome::Proceed) })),
         };
 
@@ -1273,6 +1303,7 @@ mod tests {
             is_async: false,
             once: false,
             status_message: Some("Running security audit...".to_string()),
+            matcher: None,
             func: Arc::new(|_| Box::pin(async { HookResult::from(HookOutcome::Proceed) })),
         };
 
@@ -1280,6 +1311,7 @@ mod tests {
             is_async: false,
             once: false,
             status_message: None,
+            matcher: None,
             func: Arc::new(|_| Box::pin(async { HookResult::from(HookOutcome::Proceed) })),
         };
 
@@ -1322,6 +1354,7 @@ mod tests {
             is_async: false,
             once: false,
             status_message: None,
+            matcher: None,
             func: Arc::new(|_| {
                 Box::pin(async {
                     let mut result = HookResult::from(HookOutcome::Proceed);
@@ -1335,6 +1368,7 @@ mod tests {
             is_async: false,
             once: false,
             status_message: None,
+            matcher: None,
             func: Arc::new(|_| {
                 Box::pin(async {
                     let mut result = HookResult::from(HookOutcome::Proceed);
@@ -1369,6 +1403,7 @@ mod tests {
             is_async: false,
             once: true,
             status_message: None,
+            matcher: None,
             func: Arc::new(move |_| {
                 let calls1 = Arc::clone(&calls1_clone);
                 Box::pin(async move {
@@ -1383,6 +1418,7 @@ mod tests {
             is_async: false,
             once: true,
             status_message: None,
+            matcher: None,
             func: Arc::new(move |_| {
                 let calls2 = Arc::clone(&calls2_clone);
                 Box::pin(async move {
