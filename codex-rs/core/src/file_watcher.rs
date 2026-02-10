@@ -258,7 +258,7 @@ impl FileWatcher {
 }
 
 fn classify_event(event: &Event, state: &RwLock<WatchState>) -> Vec<PathBuf> {
-    if !is_relevant_event_kind(&event.kind) {
+    if !is_relevant_event_kind(event.kind) {
         return Vec::new();
     }
 
@@ -280,7 +280,7 @@ fn classify_event(event: &Event, state: &RwLock<WatchState>) -> Vec<PathBuf> {
     skills_paths
 }
 
-fn is_relevant_event_kind(kind: &EventKind) -> bool {
+fn is_relevant_event_kind(kind: EventKind) -> bool {
     !matches!(kind, EventKind::Access(_))
 }
 

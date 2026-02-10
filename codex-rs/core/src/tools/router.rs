@@ -2,10 +2,11 @@ use crate::client_common::tools::ToolSpec;
 use crate::codex::Session;
 use crate::codex::TurnContext;
 use crate::function_tool::FunctionCallError;
+use crate::hooks::EffectAction;
 use crate::hooks::HookEvent;
 use crate::hooks::HookEventPostToolUse;
+use crate::hooks::HookEventPostToolUseFailure;
 use crate::hooks::HookEventPreToolUse;
-use crate::hooks::HookOutcome;
 use crate::hooks::HookPayload;
 use crate::sandboxing::SandboxPermissions;
 use crate::tools::context::SharedTurnDiffTracker;
@@ -25,6 +26,32 @@ use rmcp::model::Tool;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::instrument;
+
+/// Map internal tool names to Claude Code compatible names for hook payloads.
+///
+/// Claude Code uses PascalCase tool names (e.g. `Bash`, `Read`, `Write`),
+/// while Codex uses snake_case internally (e.g. `local_shell`).  This mapping
+/// ensures hook scripts see the same names regardless of which agent they run
+/// under.
+fn hook_tool_name(internal_name: &str) -> String {
+    match internal_name {
+        // All shell execution variants map to "Bash"
+        "local_shell" | "shell" | "container.exec" | "shell_command" | "exec_command" => {
+            "Bash".to_string()
+        }
+        // File-reading tools map to "Read"
+        "read_file" | "view_image" => "Read".to_string(),
+        // File-writing / stdin-piping tools map to "Write"
+        "write_stdin" => "Write".to_string(),
+        // Patch-based editing maps to "Edit"
+        "apply_patch" => "Edit".to_string(),
+        // Search tools
+        "grep_files" => "Grep".to_string(),
+        "list_dir" => "ListDir".to_string(),
+        // Other tools (MCP, custom, function tools) pass through unchanged
+        other => other.to_string(),
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct ToolCall {
@@ -154,62 +181,90 @@ impl ToolRouter {
 
         // Extract structured tool input for hooks (preserves shell arg
         // boundaries and workdir overrides, unlike log_payload()).
-        let tool_input = payload.hook_input();
+        let mut tool_input = payload.hook_input();
+        let hook_name = hook_tool_name(&tool_name);
+
+        // Normalize tool_input for "Bash" hooks: exec_command uses "cmd" but hooks expect "command"
+        if hook_name == "Bash"
+            && let Some(obj) = tool_input.as_object_mut()
+            && obj.contains_key("cmd")
+            && !obj.contains_key("command")
+            && let Some(cmd_value) = obj.remove("cmd")
+        {
+            obj.insert("command".to_string(), cmd_value);
+        }
 
         // --- PreToolUse hook ---
         let pre_outcome = session
             .hooks()
-            .dispatch(HookPayload {
-                session_id: session.conversation_id,
-                cwd: turn.cwd.clone(),
-                triggered_at: chrono::Utc::now(),
-                hook_event: HookEvent::PreToolUse {
+            .dispatch(HookPayload::new(
+                session.conversation_id,
+                turn.cwd.clone(),
+                HookEvent::PreToolUse {
                     event: HookEventPreToolUse {
-                        tool_name: tool_name.clone(),
+                        tool_name: hook_name.clone(),
                         tool_input: tool_input.clone(),
                     },
                 },
-            })
+                None,
+                turn.approval_policy.to_string(),
+            ))
             .await;
 
-        match pre_outcome {
-            HookOutcome::Proceed => {}
-            HookOutcome::Block { message } => {
-                let block_msg =
-                    message.unwrap_or_else(|| "Blocked by pre_tool_use hook".to_string());
-                return Ok(Self::failure_response(
-                    failure_call_id,
-                    payload_outputs_custom,
-                    FunctionCallError::ToolCallBlocked(block_msg),
-                ));
-            }
-            HookOutcome::Modify { content } => {
-                // Apply the modified content to the tool arguments.
-                match &mut payload {
-                    ToolPayload::Function { arguments } => {
-                        *arguments = content;
-                    }
-                    ToolPayload::Mcp { raw_arguments, .. } => {
-                        *raw_arguments = content;
-                    }
-                    ToolPayload::Custom { input } => {
-                        *input = content;
-                    }
-                    ToolPayload::LocalShell { .. } => {
-                        // Modifying shell command structure from a hook is
-                        // not safely supported.  Block the call so the
-                        // hook's policy intent is not silently bypassed.
-                        return Ok(Self::failure_response(
-                            failure_call_id,
-                            payload_outputs_custom,
-                            FunctionCallError::ToolCallBlocked(
-                                "pre_tool_use hook returned Modify for local_shell which is not supported; blocking execution".to_string(),
-                            ),
-                        ));
+        // Emit Warning events for any system messages from hooks.
+        for msg in &pre_outcome.system_messages {
+            session
+                .send_event(
+                    &turn,
+                    codex_protocol::protocol::EventMsg::Warning(
+                        codex_protocol::protocol::WarningEvent {
+                            message: format!("[hook] {msg}"),
+                        },
+                    ),
+                )
+                .await;
+        }
+
+        match pre_outcome.action {
+            EffectAction::Proceed => {
+                // If a hook returned Modify, apply the modified content.
+                if let Some(content) = pre_outcome.modified_content {
+                    match &mut payload {
+                        ToolPayload::Function { arguments } => {
+                            *arguments = content;
+                        }
+                        ToolPayload::Mcp { raw_arguments, .. } => {
+                            *raw_arguments = content;
+                        }
+                        ToolPayload::Custom { input } => {
+                            *input = content;
+                        }
+                        ToolPayload::LocalShell { .. } => {
+                            // Modifying shell command structure from a hook is
+                            // not safely supported.  Block the call so the
+                            // hook's policy intent is not silently bypassed.
+                            return Ok(Self::failure_response(
+                                failure_call_id,
+                                payload_outputs_custom,
+                                FunctionCallError::ToolCallBlocked(
+                                    "pre_tool_use hook returned Modify for local_shell which is not supported; blocking execution".to_string(),
+                                ),
+                            ));
+                        }
                     }
                 }
             }
+            EffectAction::Block { reason } => {
+                return Ok(Self::failure_response(
+                    failure_call_id,
+                    payload_outputs_custom,
+                    FunctionCallError::ToolCallBlocked(reason),
+                ));
+            }
         }
+
+        // Capture tool input for PostToolUse hook before payload is moved.
+        let tool_input_for_hook = payload.hook_input();
 
         let invocation = ToolInvocation {
             session: Arc::clone(&session),
@@ -220,42 +275,204 @@ impl ToolRouter {
             payload,
         };
 
+        let mut dispatched_failure = false;
         let result = match self.registry.dispatch(invocation).await {
             Ok(response) => Ok(response),
-            Err(FunctionCallError::Fatal(message)) => Err(FunctionCallError::Fatal(message)),
-            Err(err) => Ok(Self::failure_response(
-                failure_call_id,
-                payload_outputs_custom,
-                err,
-            )),
+            Err(FunctionCallError::Fatal(message)) => {
+                dispatched_failure = true;
+                // Dispatch PostToolUseFailure for fatal errors too.
+                let failure_effect = session
+                    .hooks()
+                    .dispatch(HookPayload::new(
+                        session.conversation_id,
+                        turn.cwd.clone(),
+                        HookEvent::PostToolUseFailure {
+                            event: HookEventPostToolUseFailure {
+                                tool_name: hook_name.clone(),
+                                error: message.clone(),
+                            },
+                        },
+                        None,
+                        turn.approval_policy.to_string(),
+                    ))
+                    .await;
+                for msg in &failure_effect.system_messages {
+                    session
+                        .send_event(
+                            &turn,
+                            codex_protocol::protocol::EventMsg::Warning(
+                                codex_protocol::protocol::WarningEvent {
+                                    message: format!("[hook] {msg}"),
+                                },
+                            ),
+                        )
+                        .await;
+                }
+                Err(FunctionCallError::Fatal(message))
+            }
+            Err(err) => {
+                dispatched_failure = true;
+                // Dispatch PostToolUseFailure hook (non-blockable).
+                let failure_effect = session
+                    .hooks()
+                    .dispatch(HookPayload::new(
+                        session.conversation_id,
+                        turn.cwd.clone(),
+                        HookEvent::PostToolUseFailure {
+                            event: HookEventPostToolUseFailure {
+                                tool_name: hook_name.clone(),
+                                error: err.to_string(),
+                            },
+                        },
+                        None,
+                        turn.approval_policy.to_string(),
+                    ))
+                    .await;
+                for msg in &failure_effect.system_messages {
+                    session
+                        .send_event(
+                            &turn,
+                            codex_protocol::protocol::EventMsg::Warning(
+                                codex_protocol::protocol::WarningEvent {
+                                    message: format!("[hook] {msg}"),
+                                },
+                            ),
+                        )
+                        .await;
+                }
+
+                Ok(Self::failure_response(
+                    failure_call_id,
+                    payload_outputs_custom,
+                    err,
+                ))
+            }
         };
 
-        // --- PostToolUse hook (fire-and-forget, does not alter the result) ---
-        // Spawned as a background task so that slow/hung post-hooks do not
-        // add latency to the tool response path.
-        if let Ok(ref response) = result {
-            let tool_output = Self::extract_output_text(response);
-            let hooks = session.hooks().clone();
-            let cwd = turn.cwd.clone();
-            let conversation_id = session.conversation_id;
-            tokio::spawn(async move {
-                hooks
-                    .dispatch(HookPayload {
-                        session_id: conversation_id,
-                        cwd,
-                        triggered_at: chrono::Utc::now(),
-                        hook_event: HookEvent::PostToolUse {
+        // Tool failures can arrive as MCP output-level errors or
+        // FunctionCallOutput with success: Some(false). Detect these and
+        // dispatch PostToolUseFailure for them.
+        if !dispatched_failure
+            && let Ok(ref response) = result
+            && let Some(error_msg) = Self::extract_tool_error(response)
+        {
+            dispatched_failure = true;
+            let failure_effect = session
+                .hooks()
+                .dispatch(HookPayload::new(
+                    session.conversation_id,
+                    turn.cwd.clone(),
+                    HookEvent::PostToolUseFailure {
+                        event: HookEventPostToolUseFailure {
+                            tool_name: hook_name.clone(),
+                            error: error_msg,
+                        },
+                    },
+                    None,
+                    turn.approval_policy.to_string(),
+                ))
+                .await;
+            for msg in &failure_effect.system_messages {
+                session
+                    .send_event(
+                        &turn,
+                        codex_protocol::protocol::EventMsg::Warning(
+                            codex_protocol::protocol::WarningEvent {
+                                message: format!("[hook] {msg}"),
+                            },
+                        ),
+                    )
+                    .await;
+            }
+        }
+
+        // --- PostToolUse hook (only for successful invocations) ---
+        // Awaited inline so hooks can inspect/modify tool output and inject
+        // system messages.  PostToolUse is non-blockable so a Block decision
+        // from the hook is treated as a warning.
+        if !dispatched_failure
+            && let Ok(ref response) = result
+        {
+                let tool_output = Self::extract_output_text(response);
+                let post_outcome = session
+                    .hooks()
+                    .dispatch(HookPayload::new(
+                        session.conversation_id,
+                        turn.cwd.clone(),
+                        HookEvent::PostToolUse {
                             event: HookEventPostToolUse {
-                                tool_name,
+                                tool_name: hook_name,
+                                tool_input: tool_input_for_hook,
                                 tool_output,
                             },
                         },
-                    })
+                        None,
+                        turn.approval_policy.to_string(),
+                    ))
                     .await;
-            });
+
+                // Emit Warning events for any system messages from post-tool hooks.
+                for msg in &post_outcome.system_messages {
+                    session
+                        .send_event(
+                            &turn,
+                            codex_protocol::protocol::EventMsg::Warning(
+                                codex_protocol::protocol::WarningEvent {
+                                    message: format!("[hook] {msg}"),
+                                },
+                            ),
+                        )
+                        .await;
+                }
+
+                // PostToolUse is non-blockable; a Block decision is informational only.
+                if let EffectAction::Block { reason } = &post_outcome.action {
+                    tracing::warn!("post_tool_use hook returned block (non-blocking): {reason}");
+                }
+
+                if post_outcome.suppress_output {
+                    tracing::info!("post_tool_use hook requested output suppression");
+                    return Ok(Self::suppressed_response(response));
+                }
+
+                // Apply modified content from PostToolUse hooks (e.g. redaction).
+                if let Some(content) = post_outcome.modified_content {
+                    tracing::info!("post_tool_use hook modified tool output");
+                    return Ok(Self::modified_response(response, &content));
+                }
         }
 
         result
+    }
+
+    /// Check if the response represents a tool error and return the error message.
+    ///
+    /// Detects failures from both MCP and non-MCP tool responses:
+    /// - `McpToolCallOutput { result: Err(..) }` — transport/protocol error
+    /// - `McpToolCallOutput { result: Ok(CallToolResult { is_error: Some(true) }) }` — MCP error
+    /// - `FunctionCallOutput { output: { success: Some(false) } }` — non-MCP tool error
+    fn extract_tool_error(item: &ResponseInputItem) -> Option<String> {
+        match item {
+            ResponseInputItem::McpToolCallOutput { result, .. } => match result {
+                Err(err) => Some(err.clone()),
+                Ok(ctr) if ctr.is_error == Some(true) => {
+                    let payload: codex_protocol::models::FunctionCallOutputPayload = ctr.into();
+                    Some(payload.body.to_text().unwrap_or_else(|| "MCP tool error".to_string()))
+                }
+                _ => None,
+            },
+            ResponseInputItem::FunctionCallOutput { output, .. }
+                if output.success == Some(false) =>
+            {
+                Some(
+                    output
+                        .body
+                        .to_text()
+                        .unwrap_or_else(|| "tool call failed".to_string()),
+                )
+            }
+            _ => None,
+        }
     }
 
     /// Extract a textual preview from a `ResponseInputItem` for the PostToolUse hook.
@@ -273,6 +490,80 @@ impl ToolRouter {
             },
             ResponseInputItem::CustomToolCallOutput { output, .. } => output.clone(),
             _ => String::new(),
+        }
+    }
+
+    /// Replace tool output with a suppression notice when a PostToolUse hook
+    /// requests output suppression.
+    fn suppressed_response(original: &ResponseInputItem) -> ResponseInputItem {
+        const MSG: &str = "[output suppressed by hook]";
+        match original {
+            ResponseInputItem::FunctionCallOutput { call_id, output } => {
+                ResponseInputItem::FunctionCallOutput {
+                    call_id: call_id.clone(),
+                    output: codex_protocol::models::FunctionCallOutputPayload {
+                        body: FunctionCallOutputBody::Text(MSG.to_string()),
+                        success: output.success,
+                    },
+                }
+            }
+            ResponseInputItem::McpToolCallOutput { call_id, result } => {
+                let success = match result {
+                    Ok(ctr) => Some(ctr.is_error != Some(true)),
+                    Err(_) => Some(false),
+                };
+                ResponseInputItem::FunctionCallOutput {
+                    call_id: call_id.clone(),
+                    output: codex_protocol::models::FunctionCallOutputPayload {
+                        body: FunctionCallOutputBody::Text(MSG.to_string()),
+                        success,
+                    },
+                }
+            }
+            ResponseInputItem::CustomToolCallOutput { call_id, .. } => {
+                ResponseInputItem::CustomToolCallOutput {
+                    call_id: call_id.clone(),
+                    output: MSG.to_string(),
+                }
+            }
+            // Non-tool response items pass through unchanged.
+            other => other.clone(),
+        }
+    }
+
+    /// Replace tool output text with hook-modified content, preserving the
+    /// original response shape, call_id, and success status.
+    fn modified_response(original: &ResponseInputItem, new_content: &str) -> ResponseInputItem {
+        match original {
+            ResponseInputItem::FunctionCallOutput { call_id, output } => {
+                ResponseInputItem::FunctionCallOutput {
+                    call_id: call_id.clone(),
+                    output: codex_protocol::models::FunctionCallOutputPayload {
+                        body: FunctionCallOutputBody::Text(new_content.to_string()),
+                        success: output.success,
+                    },
+                }
+            }
+            ResponseInputItem::McpToolCallOutput { call_id, result } => {
+                let success = match result {
+                    Ok(ctr) => Some(ctr.is_error != Some(true)),
+                    Err(_) => Some(false),
+                };
+                ResponseInputItem::FunctionCallOutput {
+                    call_id: call_id.clone(),
+                    output: codex_protocol::models::FunctionCallOutputPayload {
+                        body: FunctionCallOutputBody::Text(new_content.to_string()),
+                        success,
+                    },
+                }
+            }
+            ResponseInputItem::CustomToolCallOutput { call_id, .. } => {
+                ResponseInputItem::CustomToolCallOutput {
+                    call_id: call_id.clone(),
+                    output: new_content.to_string(),
+                }
+            }
+            other => other.clone(),
         }
     }
 
@@ -296,5 +587,296 @@ impl ToolRouter {
                 },
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_hook_tool_name_shell_variants() {
+        // All shell execution variants should map to "Bash"
+        assert_eq!(hook_tool_name("local_shell"), "Bash");
+        assert_eq!(hook_tool_name("shell"), "Bash");
+        assert_eq!(hook_tool_name("container.exec"), "Bash");
+        assert_eq!(hook_tool_name("shell_command"), "Bash");
+        assert_eq!(hook_tool_name("exec_command"), "Bash");
+    }
+
+    #[test]
+    fn test_hook_tool_name_builtin_mappings() {
+        // Built-in file/search tools map to Claude Code PascalCase names
+        assert_eq!(hook_tool_name("read_file"), "Read");
+        assert_eq!(hook_tool_name("view_image"), "Read");
+        assert_eq!(hook_tool_name("write_stdin"), "Write");
+        assert_eq!(hook_tool_name("apply_patch"), "Edit");
+        assert_eq!(hook_tool_name("grep_files"), "Grep");
+        assert_eq!(hook_tool_name("list_dir"), "ListDir");
+    }
+
+    #[test]
+    fn test_hook_tool_name_passthrough() {
+        // MCP tools should pass through with their full qualified names
+        assert_eq!(hook_tool_name("mcp__server__tool"), "mcp__server__tool");
+
+        // Custom tools should pass through
+        assert_eq!(hook_tool_name("custom_tool"), "custom_tool");
+    }
+
+    #[test]
+    fn test_hook_input_local_shell() {
+        let payload = ToolPayload::LocalShell {
+            params: ShellToolCallParams {
+                command: vec!["ls".to_string(), "-la".to_string()],
+                workdir: Some("/tmp".into()),
+                timeout_ms: Some(5000),
+                sandbox_permissions: Some(SandboxPermissions::UseDefault),
+                prefix_rule: None,
+                justification: None,
+            },
+        };
+
+        let input = payload.hook_input();
+        assert!(input.is_object());
+
+        // Should contain command field as array
+        assert_eq!(
+            input.get("command"),
+            Some(&serde_json::json!(["ls", "-la"]))
+        );
+
+        // Should contain workdir field
+        assert_eq!(
+            input.get("workdir"),
+            Some(&serde_json::json!("/tmp"))
+        );
+
+        // Should contain timeout_ms field
+        assert_eq!(
+            input.get("timeout_ms"),
+            Some(&serde_json::json!(5000))
+        );
+    }
+
+    #[test]
+    fn test_hook_input_local_shell_minimal() {
+        let payload = ToolPayload::LocalShell {
+            params: ShellToolCallParams {
+                command: vec!["echo".to_string(), "test".to_string()],
+                workdir: None,
+                timeout_ms: None,
+                sandbox_permissions: Some(SandboxPermissions::UseDefault),
+                prefix_rule: None,
+                justification: None,
+            },
+        };
+
+        let input = payload.hook_input();
+        assert!(input.is_object());
+
+        // Should contain command field
+        assert_eq!(
+            input.get("command"),
+            Some(&serde_json::json!(["echo", "test"]))
+        );
+
+        // workdir and timeout_ms should not be present when None
+        assert_eq!(input.get("workdir"), None);
+        assert_eq!(input.get("timeout_ms"), None);
+    }
+
+    #[test]
+    fn test_hook_input_function_valid_json() {
+        let payload = ToolPayload::Function {
+            arguments: r#"{"path": "/tmp/test.txt", "mode": "read"}"#.to_string(),
+        };
+
+        let input = payload.hook_input();
+
+        // Function arguments should be parsed as JSON object
+        assert!(input.is_object());
+        assert_eq!(
+            input.get("path"),
+            Some(&serde_json::json!("/tmp/test.txt"))
+        );
+        assert_eq!(
+            input.get("mode"),
+            Some(&serde_json::json!("read"))
+        );
+    }
+
+    #[test]
+    fn test_hook_input_function_invalid_json() {
+        let payload = ToolPayload::Function {
+            arguments: "not valid json".to_string(),
+        };
+
+        let input = payload.hook_input();
+
+        // Invalid JSON should fallback to string
+        assert_eq!(input, serde_json::json!("not valid json"));
+    }
+
+    #[test]
+    fn test_hook_input_custom_valid_json() {
+        let payload = ToolPayload::Custom {
+            input: r#"{"action": "patch", "content": "diff"}"#.to_string(),
+        };
+
+        let input = payload.hook_input();
+
+        // Custom input should be parsed as JSON object
+        assert!(input.is_object());
+        assert_eq!(
+            input.get("action"),
+            Some(&serde_json::json!("patch"))
+        );
+    }
+
+    #[test]
+    fn test_hook_input_custom_invalid_json() {
+        let payload = ToolPayload::Custom {
+            input: "plain text input".to_string(),
+        };
+
+        let input = payload.hook_input();
+
+        // Invalid JSON should fallback to string
+        assert_eq!(input, serde_json::json!("plain text input"));
+    }
+
+    #[test]
+    fn test_hook_input_mcp_valid_json() {
+        let payload = ToolPayload::Mcp {
+            server: "test-server".to_string(),
+            tool: "test-tool".to_string(),
+            raw_arguments: r#"{"key": "value", "number": 42}"#.to_string(),
+        };
+
+        let input = payload.hook_input();
+
+        // MCP arguments should be parsed as JSON object
+        assert!(input.is_object());
+        assert_eq!(
+            input.get("key"),
+            Some(&serde_json::json!("value"))
+        );
+        assert_eq!(
+            input.get("number"),
+            Some(&serde_json::json!(42))
+        );
+    }
+
+    #[test]
+    fn test_hook_input_mcp_invalid_json() {
+        let payload = ToolPayload::Mcp {
+            server: "test-server".to_string(),
+            tool: "test-tool".to_string(),
+            raw_arguments: "invalid".to_string(),
+        };
+
+        let input = payload.hook_input();
+
+        // Invalid JSON should fallback to string
+        assert_eq!(input, serde_json::json!("invalid"));
+    }
+
+    #[test]
+    fn test_bash_hook_input_normalization() {
+        // Test that exec_command's "cmd" field is normalized to "command" for Bash hooks
+        let payload = ToolPayload::Function {
+            arguments: r#"{"cmd": "ls -la", "workdir": "/tmp"}"#.to_string(),
+        };
+
+        let mut tool_input = payload.hook_input();
+        let hook_name = hook_tool_name("exec_command");
+
+        // Before normalization, should have "cmd"
+        assert_eq!(hook_name, "Bash");
+        assert!(tool_input.get("cmd").is_some());
+        assert!(tool_input.get("command").is_none());
+
+        // Apply normalization logic (simulating the router behavior)
+        if hook_name == "Bash"
+            && let Some(obj) = tool_input.as_object_mut()
+            && obj.contains_key("cmd")
+            && !obj.contains_key("command")
+            && let Some(cmd_value) = obj.remove("cmd")
+        {
+            obj.insert("command".to_string(), cmd_value);
+        }
+
+        // After normalization, should have "command" not "cmd"
+        assert_eq!(
+            tool_input.get("command"),
+            Some(&serde_json::json!("ls -la"))
+        );
+        assert!(tool_input.get("cmd").is_none());
+        // Other fields should be preserved
+        assert_eq!(
+            tool_input.get("workdir"),
+            Some(&serde_json::json!("/tmp"))
+        );
+    }
+
+    #[test]
+    fn test_bash_hook_input_normalization_preserves_existing_command() {
+        // Test that if "command" already exists, we don't overwrite it
+        let payload = ToolPayload::Function {
+            arguments: r#"{"cmd": "ls", "command": "pwd"}"#.to_string(),
+        };
+
+        let mut tool_input = payload.hook_input();
+        let hook_name = hook_tool_name("exec_command");
+
+        // Apply normalization logic
+        if hook_name == "Bash"
+            && let Some(obj) = tool_input.as_object_mut()
+            && obj.contains_key("cmd")
+            && !obj.contains_key("command")
+            && let Some(cmd_value) = obj.remove("cmd")
+        {
+            obj.insert("command".to_string(), cmd_value);
+        }
+
+        // Should keep original "command", not replace it
+        assert_eq!(
+            tool_input.get("command"),
+            Some(&serde_json::json!("pwd"))
+        );
+        // "cmd" should still be present (not removed)
+        assert_eq!(
+            tool_input.get("cmd"),
+            Some(&serde_json::json!("ls"))
+        );
+    }
+
+    #[test]
+    fn test_bash_hook_input_normalization_non_bash_tools() {
+        // Test that non-Bash tools don't get normalized
+        let payload = ToolPayload::Function {
+            arguments: r#"{"cmd": "some-command"}"#.to_string(),
+        };
+
+        let mut tool_input = payload.hook_input();
+        let hook_name = hook_tool_name("read_file"); // Maps to "Read", not "Bash"
+
+        // Apply normalization logic
+        if hook_name == "Bash"
+            && let Some(obj) = tool_input.as_object_mut()
+            && obj.contains_key("cmd")
+            && !obj.contains_key("command")
+            && let Some(cmd_value) = obj.remove("cmd")
+        {
+            obj.insert("command".to_string(), cmd_value);
+        }
+
+        // Should NOT normalize for non-Bash tools
+        assert_eq!(
+            tool_input.get("cmd"),
+            Some(&serde_json::json!("some-command"))
+        );
+        assert!(tool_input.get("command").is_none());
     }
 }
