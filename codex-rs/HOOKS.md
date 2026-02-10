@@ -433,11 +433,11 @@ Hooks can return additional metadata alongside the decision:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `system_message` | String | Injected into conversation as system message |
+| `system_message` | String | Emitted as a UI warning event (not injected into model context) |
 | `suppress_output` | Boolean | Suppress tool output from display |
 | `stop_reason` | String | Override stop reason for Stop events |
 
-Multiple hooks can return system messages; all will be collected and injected.
+Multiple hooks can return system messages; all will be collected and emitted as warnings.
 
 ## Exit Code Semantics
 
