@@ -1392,8 +1392,13 @@ impl Config {
         codex_home: PathBuf,
         config_layer_stack: ConfigLayerStack,
     ) -> std::io::Result<Self> {
-        // Use proper append-merge semantics for hooks instead of last-wins
-        cfg.hooks = config_layer_stack.effective_hooks_config();
+        // Use proper append-merge semantics for hooks instead of last-wins.
+        // Only overwrite if the layer stack actually contributed hooks,
+        // otherwise preserve any hooks already present in cfg.
+        let merged_hooks = config_layer_stack.effective_hooks_config();
+        if merged_hooks != crate::hooks::config::HooksConfigToml::default() {
+            cfg.hooks = merged_hooks;
+        }
 
         let requirements = config_layer_stack.requirements().clone();
         let user_instructions = Self::load_instructions(Some(&codex_home));

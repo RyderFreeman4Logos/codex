@@ -265,10 +265,12 @@ impl ToolRouter {
             payload,
         };
 
+        let mut dispatched_failure = false;
         let result = match self.registry.dispatch(invocation).await {
             Ok(response) => Ok(response),
             Err(FunctionCallError::Fatal(message)) => Err(FunctionCallError::Fatal(message)),
             Err(err) => {
+                dispatched_failure = true;
                 // Dispatch PostToolUseFailure hook (non-blockable).
                 session
                     .hooks()
@@ -294,52 +296,54 @@ impl ToolRouter {
             }
         };
 
-        // --- PostToolUse hook ---
+        // --- PostToolUse hook (only for successful invocations) ---
         // Awaited inline so hooks can inspect/modify tool output and inject
         // system messages.  PostToolUse is non-blockable so a Block decision
         // from the hook is treated as a warning.
-        if let Ok(ref response) = result {
-            let tool_output = Self::extract_output_text(response);
-            let post_outcome = session
-                .hooks()
-                .dispatch(HookPayload::new(
-                    session.conversation_id,
-                    turn.cwd.clone(),
-                    HookEvent::PostToolUse {
-                        event: HookEventPostToolUse {
-                            tool_name: hook_name,
-                            tool_input: tool_input_for_hook,
-                            tool_output,
-                        },
-                    },
-                    None,
-                    turn.approval_policy.to_string(),
-                ))
-                .await;
-
-            // Emit Warning events for any system messages from post-tool hooks.
-            for msg in &post_outcome.system_messages {
-                session
-                    .send_event(
-                        &turn,
-                        codex_protocol::protocol::EventMsg::Warning(
-                            codex_protocol::protocol::WarningEvent {
-                                message: format!("[hook] {msg}"),
+        if !dispatched_failure
+            && let Ok(ref response) = result
+        {
+                let tool_output = Self::extract_output_text(response);
+                let post_outcome = session
+                    .hooks()
+                    .dispatch(HookPayload::new(
+                        session.conversation_id,
+                        turn.cwd.clone(),
+                        HookEvent::PostToolUse {
+                            event: HookEventPostToolUse {
+                                tool_name: hook_name,
+                                tool_input: tool_input_for_hook,
+                                tool_output,
                             },
-                        ),
-                    )
+                        },
+                        None,
+                        turn.approval_policy.to_string(),
+                    ))
                     .await;
-            }
 
-            // PostToolUse is non-blockable; a Block decision is informational only.
-            if let EffectAction::Block { reason } = &post_outcome.action {
-                tracing::warn!("post_tool_use hook returned block (non-blocking): {reason}");
-            }
+                // Emit Warning events for any system messages from post-tool hooks.
+                for msg in &post_outcome.system_messages {
+                    session
+                        .send_event(
+                            &turn,
+                            codex_protocol::protocol::EventMsg::Warning(
+                                codex_protocol::protocol::WarningEvent {
+                                    message: format!("[hook] {msg}"),
+                                },
+                            ),
+                        )
+                        .await;
+                }
 
-            if post_outcome.suppress_output {
-                tracing::info!("post_tool_use hook requested output suppression");
-                return Ok(Self::suppressed_response(response));
-            }
+                // PostToolUse is non-blockable; a Block decision is informational only.
+                if let EffectAction::Block { reason } = &post_outcome.action {
+                    tracing::warn!("post_tool_use hook returned block (non-blocking): {reason}");
+                }
+
+                if post_outcome.suppress_output {
+                    tracing::info!("post_tool_use hook requested output suppression");
+                    return Ok(Self::suppressed_response(response));
+                }
         }
 
         result
@@ -377,12 +381,16 @@ impl ToolRouter {
                     },
                 }
             }
-            ResponseInputItem::McpToolCallOutput { call_id, .. } => {
+            ResponseInputItem::McpToolCallOutput { call_id, result } => {
+                let success = match result {
+                    Ok(ctr) => Some(ctr.is_error != Some(true)),
+                    Err(_) => Some(false),
+                };
                 ResponseInputItem::FunctionCallOutput {
                     call_id: call_id.clone(),
                     output: codex_protocol::models::FunctionCallOutputPayload {
                         body: FunctionCallOutputBody::Text(MSG.to_string()),
-                        success: Some(true),
+                        success,
                     },
                 }
             }
