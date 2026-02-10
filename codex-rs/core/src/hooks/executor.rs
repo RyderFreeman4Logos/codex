@@ -210,7 +210,7 @@ pub(super) fn command_hook(command: super::config::CommandSpec, timeout: Duratio
                 let cmd_summary = match &command_spec {
                     super::config::CommandSpec::Shell(s) => {
                         if s.len() > 50 {
-                            format!("{}...", &s[..50])
+                            format!("{}...", &s[..s.floor_char_boundary(50)])
                         } else {
                             s.clone()
                         }
@@ -218,7 +218,7 @@ pub(super) fn command_hook(command: super::config::CommandSpec, timeout: Duratio
                     super::config::CommandSpec::Argv(argv) => {
                         if let Some(first) = argv.first() {
                             if first.len() > 50 {
-                                format!("{}...", &first[..50])
+                                format!("{}...", &first[..first.floor_char_boundary(50)])
                             } else {
                                 first.clone()
                             }
@@ -453,7 +453,7 @@ pub(super) fn command_hook(command: super::config::CommandSpec, timeout: Duratio
                         Err(err) => {
                             let stdout_preview = String::from_utf8_lossy(&stdout_bytes);
                             let truncated = if stdout_preview.len() > 200 {
-                                format!("{}...", &stdout_preview[..200])
+                                format!("{}...", &stdout_preview[..stdout_preview.floor_char_boundary(200)])
                             } else {
                                 stdout_preview.to_string()
                             };
