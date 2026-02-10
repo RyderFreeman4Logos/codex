@@ -269,6 +269,9 @@ pub(super) fn hook_from_entry(entry: &HookEntryToml) -> Hook {
                 }
             };
 
+            // Check if this is a never-match regex (from invalid pattern)
+            let is_never_match = regex.as_str() == r"[^\s\S]";
+
             let matcher_for_struct = Some(regex.clone());
             Hook {
                 func: Arc::new(move |payload| {
@@ -280,8 +283,11 @@ pub(super) fn hook_from_entry(entry: &HookEntryToml) -> Hook {
                         } else {
                             Box::pin(async { super::types::HookResult::default() })
                         }
+                    } else if is_never_match {
+                        // Events without matchable fields: skip if matcher is disabled
+                        Box::pin(async { super::types::HookResult::default() })
                     } else {
-                        // Events without matchable fields always execute
+                        // Events without matchable fields: execute if matcher is valid
                         inner.func.clone()(payload)
                     }
                 }),

@@ -229,25 +229,67 @@ impl Hooks {
 
         // Spawn async hooks as fire-and-forget tasks, throttled by the
         // same semaphore to prevent unbounded concurrent processes.
-        for (_idx, hook) in async_hooks_with_idx {
-            let hook = hook.clone();
-            let payload = hook_payload.clone();
-            let sem = self.semaphore.clone();
-            tokio::spawn(async move {
-                let Ok(_permit) = sem.acquire_owned().await else {
-                    tracing::warn!(
-                        event = %payload.hook_event_name,
-                        "Async hook semaphore closed, skipping"
-                    );
-                    return;
+        // For SessionStart, create per-hook env files so async hooks get them too.
+        if is_session_start {
+            for (_idx, hook) in async_hooks_with_idx {
+                let hook = hook.clone();
+                let mut payload = hook_payload.clone();
+                let sem = self.semaphore.clone();
+
+                // Create a per-hook env file for this async hook
+                let env_file_guard = match tempfile::NamedTempFile::new() {
+                    Ok(file) => {
+                        payload.env_file_path = Some(file.path().to_path_buf());
+                        Some(file)
+                    }
+                    Err(err) => {
+                        tracing::warn!("failed to create env file for async hook: {err}");
+                        None
+                    }
                 };
-                let result = hook.execute(&payload).await;
-                tracing::debug!(
-                    event = %payload.hook_event_name,
-                    outcome = ?result.outcome,
-                    "Async hook completed"
-                );
-            });
+
+                tokio::spawn(async move {
+                    // Keep env_file_guard alive until hook completes
+                    let _env_guard = env_file_guard;
+
+                    let Ok(_permit) = sem.acquire_owned().await else {
+                        tracing::warn!(
+                            event = %payload.hook_event_name,
+                            "Async hook semaphore closed, skipping"
+                        );
+                        return;
+                    };
+                    let result = hook.execute(&payload).await;
+                    tracing::debug!(
+                        event = %payload.hook_event_name,
+                        outcome = ?result.outcome,
+                        "Async hook completed"
+                    );
+                    // env_file_guard dropped here
+                });
+            }
+        } else {
+            // Non-SessionStart events: no env file needed
+            for (_idx, hook) in async_hooks_with_idx {
+                let hook = hook.clone();
+                let payload = hook_payload.clone();
+                let sem = self.semaphore.clone();
+                tokio::spawn(async move {
+                    let Ok(_permit) = sem.acquire_owned().await else {
+                        tracing::warn!(
+                            event = %payload.hook_event_name,
+                            "Async hook semaphore closed, skipping"
+                        );
+                        return;
+                    };
+                    let result = hook.execute(&payload).await;
+                    tracing::debug!(
+                        event = %payload.hook_event_name,
+                        outcome = ?result.outcome,
+                        "Async hook completed"
+                    );
+                });
+            }
         }
 
         // Execute sync hooks concurrently with semaphore-based throttling.
