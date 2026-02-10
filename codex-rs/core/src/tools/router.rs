@@ -296,6 +296,31 @@ impl ToolRouter {
             }
         };
 
+        // MCP tool failures arrive as Ok(McpToolCallOutput { result: Err(..) })
+        // or Ok(McpToolCallOutput { result: Ok(CallToolResult { is_error: Some(true) }) }).
+        // Detect these and dispatch PostToolUseFailure for them too.
+        if !dispatched_failure
+            && let Ok(ref response) = result
+            && let Some(error_msg) = Self::extract_mcp_error(response)
+        {
+            dispatched_failure = true;
+            session
+                .hooks()
+                .dispatch(HookPayload::new(
+                    session.conversation_id,
+                    turn.cwd.clone(),
+                    HookEvent::PostToolUseFailure {
+                        event: HookEventPostToolUseFailure {
+                            tool_name: hook_name.clone(),
+                            error: error_msg,
+                        },
+                    },
+                    None,
+                    turn.approval_policy.to_string(),
+                ))
+                .await;
+        }
+
         // --- PostToolUse hook (only for successful invocations) ---
         // Awaited inline so hooks can inspect/modify tool output and inject
         // system messages.  PostToolUse is non-blockable so a Block decision
@@ -347,6 +372,24 @@ impl ToolRouter {
         }
 
         result
+    }
+
+    /// Check if the response is an MCP error and return the error message if so.
+    ///
+    /// MCP tool failures arrive as `Ok(McpToolCallOutput { result: Err(..) })` or
+    /// `Ok(McpToolCallOutput { result: Ok(CallToolResult { is_error: Some(true), .. }) })`.
+    fn extract_mcp_error(item: &ResponseInputItem) -> Option<String> {
+        match item {
+            ResponseInputItem::McpToolCallOutput { result, .. } => match result {
+                Err(err) => Some(err.clone()),
+                Ok(ctr) if ctr.is_error == Some(true) => {
+                    let payload: codex_protocol::models::FunctionCallOutputPayload = ctr.into();
+                    Some(payload.body.to_text().unwrap_or_else(|| "MCP tool error".to_string()))
+                }
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
     /// Extract a textual preview from a `ResponseInputItem` for the PostToolUse hook.
