@@ -60,10 +60,12 @@ impl ToolPayload {
     /// this preserves full argument structure for `LocalShell` payloads
     /// (command as JSON array + workdir override) so hooks can enforce
     /// accurate security policies.
-    pub fn hook_input(&self) -> String {
+    pub fn hook_input(&self) -> serde_json::Value {
         match self {
-            ToolPayload::Function { arguments } => arguments.clone(),
-            ToolPayload::Custom { input } => input.clone(),
+            ToolPayload::Function { arguments } => serde_json::from_str(arguments)
+                .unwrap_or(serde_json::Value::String(arguments.clone())),
+            ToolPayload::Custom { input } => serde_json::from_str(input)
+                .unwrap_or(serde_json::Value::String(input.clone())),
             ToolPayload::LocalShell { params } => {
                 let mut obj = serde_json::json!({
                     "command": params.command,
@@ -74,9 +76,10 @@ impl ToolPayload {
                 if let Some(timeout_ms) = params.timeout_ms {
                     obj["timeout_ms"] = serde_json::Value::Number(timeout_ms.into());
                 }
-                obj.to_string()
+                obj
             }
-            ToolPayload::Mcp { raw_arguments, .. } => raw_arguments.clone(),
+            ToolPayload::Mcp { raw_arguments, .. } => serde_json::from_str(raw_arguments)
+                .unwrap_or(serde_json::Value::String(raw_arguments.clone())),
         }
     }
 }
