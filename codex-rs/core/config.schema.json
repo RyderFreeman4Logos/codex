@@ -481,20 +481,6 @@
           "description": "When `true`, all hooks are disabled regardless of per-event entries.",
           "type": "boolean"
         },
-        "notification": {
-          "default": [],
-          "items": {
-            "$ref": "#/definitions/MatcherGroupToml"
-          },
-          "type": "array"
-        },
-        "permission_request": {
-          "default": [],
-          "items": {
-            "$ref": "#/definitions/MatcherGroupToml"
-          },
-          "type": "array"
-        },
         "post_tool_use": {
           "default": [],
           "items": {
@@ -537,13 +523,6 @@
           },
           "type": "array"
         },
-        "stop": {
-          "default": [],
-          "items": {
-            "$ref": "#/definitions/MatcherGroupToml"
-          },
-          "type": "array"
-        },
         "subagent_start": {
           "default": [],
           "items": {
@@ -559,13 +538,6 @@
           "type": "array"
         },
         "task_completed": {
-          "default": [],
-          "items": {
-            "$ref": "#/definitions/MatcherGroupToml"
-          },
-          "type": "array"
-        },
-        "user_prompt_submit": {
           "default": [],
           "items": {
             "$ref": "#/definitions/MatcherGroupToml"
@@ -1602,19 +1574,15 @@
       "default": {
         "after_agent": [],
         "disable_all_hooks": false,
-        "notification": [],
-        "permission_request": [],
         "post_tool_use": [],
         "post_tool_use_failure": [],
         "pre_compact": [],
         "pre_tool_use": [],
         "session_end": [],
         "session_start": [],
-        "stop": [],
         "subagent_start": [],
         "subagent_stop": [],
-        "task_completed": [],
-        "user_prompt_submit": []
+        "task_completed": []
       },
       "description": "Hook definitions grouped by event type. Each hook specifies a command to execute and optionally a matcher pattern for tool-use events."
     },
