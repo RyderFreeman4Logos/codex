@@ -296,12 +296,12 @@ impl ToolRouter {
             }
         };
 
-        // MCP tool failures arrive as Ok(McpToolCallOutput { result: Err(..) })
-        // or Ok(McpToolCallOutput { result: Ok(CallToolResult { is_error: Some(true) }) }).
-        // Detect these and dispatch PostToolUseFailure for them too.
+        // Tool failures can arrive as MCP output-level errors or
+        // FunctionCallOutput with success: Some(false). Detect these and
+        // dispatch PostToolUseFailure for them.
         if !dispatched_failure
             && let Ok(ref response) = result
-            && let Some(error_msg) = Self::extract_mcp_error(response)
+            && let Some(error_msg) = Self::extract_tool_error(response)
         {
             dispatched_failure = true;
             session
@@ -369,16 +369,24 @@ impl ToolRouter {
                     tracing::info!("post_tool_use hook requested output suppression");
                     return Ok(Self::suppressed_response(response));
                 }
+
+                // Apply modified content from PostToolUse hooks (e.g. redaction).
+                if let Some(content) = post_outcome.modified_content {
+                    tracing::info!("post_tool_use hook modified tool output");
+                    return Ok(Self::modified_response(response, &content));
+                }
         }
 
         result
     }
 
-    /// Check if the response is an MCP error and return the error message if so.
+    /// Check if the response represents a tool error and return the error message.
     ///
-    /// MCP tool failures arrive as `Ok(McpToolCallOutput { result: Err(..) })` or
-    /// `Ok(McpToolCallOutput { result: Ok(CallToolResult { is_error: Some(true), .. }) })`.
-    fn extract_mcp_error(item: &ResponseInputItem) -> Option<String> {
+    /// Detects failures from both MCP and non-MCP tool responses:
+    /// - `McpToolCallOutput { result: Err(..) }` — transport/protocol error
+    /// - `McpToolCallOutput { result: Ok(CallToolResult { is_error: Some(true) }) }` — MCP error
+    /// - `FunctionCallOutput { output: { success: Some(false) } }` — non-MCP tool error
+    fn extract_tool_error(item: &ResponseInputItem) -> Option<String> {
         match item {
             ResponseInputItem::McpToolCallOutput { result, .. } => match result {
                 Err(err) => Some(err.clone()),
@@ -388,6 +396,16 @@ impl ToolRouter {
                 }
                 _ => None,
             },
+            ResponseInputItem::FunctionCallOutput { output, .. }
+                if output.success == Some(false) =>
+            {
+                Some(
+                    output
+                        .body
+                        .to_text()
+                        .unwrap_or_else(|| "tool call failed".to_string()),
+                )
+            }
             _ => None,
         }
     }
@@ -444,6 +462,42 @@ impl ToolRouter {
                 }
             }
             // Non-tool response items pass through unchanged.
+            other => other.clone(),
+        }
+    }
+
+    /// Replace tool output text with hook-modified content, preserving the
+    /// original response shape, call_id, and success status.
+    fn modified_response(original: &ResponseInputItem, new_content: &str) -> ResponseInputItem {
+        match original {
+            ResponseInputItem::FunctionCallOutput { call_id, output } => {
+                ResponseInputItem::FunctionCallOutput {
+                    call_id: call_id.clone(),
+                    output: codex_protocol::models::FunctionCallOutputPayload {
+                        body: FunctionCallOutputBody::Text(new_content.to_string()),
+                        success: output.success,
+                    },
+                }
+            }
+            ResponseInputItem::McpToolCallOutput { call_id, result } => {
+                let success = match result {
+                    Ok(ctr) => Some(ctr.is_error != Some(true)),
+                    Err(_) => Some(false),
+                };
+                ResponseInputItem::FunctionCallOutput {
+                    call_id: call_id.clone(),
+                    output: codex_protocol::models::FunctionCallOutputPayload {
+                        body: FunctionCallOutputBody::Text(new_content.to_string()),
+                        success,
+                    },
+                }
+            }
+            ResponseInputItem::CustomToolCallOutput { call_id, .. } => {
+                ResponseInputItem::CustomToolCallOutput {
+                    call_id: call_id.clone(),
+                    output: new_content.to_string(),
+                }
+            }
             other => other.clone(),
         }
     }

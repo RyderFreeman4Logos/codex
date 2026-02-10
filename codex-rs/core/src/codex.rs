@@ -1197,7 +1197,14 @@ impl Session {
                 session_configuration.cwd.clone(),
                 HookEvent::SessionStart {
                     event: HookEventSessionStart {
-                        source: "cli".to_string(),
+                        source: match &session_configuration.session_source {
+                            codex_protocol::protocol::SessionSource::Cli => "cli",
+                            codex_protocol::protocol::SessionSource::VSCode => "vscode",
+                            codex_protocol::protocol::SessionSource::Exec => "exec",
+                            codex_protocol::protocol::SessionSource::Mcp => "mcp",
+                            codex_protocol::protocol::SessionSource::SubAgent(_) => "subagent",
+                            codex_protocol::protocol::SessionSource::Unknown => "unknown",
+                        }.to_string(),
                         model: session_configuration.collaboration_mode.model().to_string(),
                         agent_type: "codex".to_string(),
                     },
