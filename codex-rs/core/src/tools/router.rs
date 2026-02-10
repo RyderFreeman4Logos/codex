@@ -268,7 +268,38 @@ impl ToolRouter {
         let mut dispatched_failure = false;
         let result = match self.registry.dispatch(invocation).await {
             Ok(response) => Ok(response),
-            Err(FunctionCallError::Fatal(message)) => Err(FunctionCallError::Fatal(message)),
+            Err(FunctionCallError::Fatal(message)) => {
+                dispatched_failure = true;
+                // Dispatch PostToolUseFailure for fatal errors too.
+                let failure_effect = session
+                    .hooks()
+                    .dispatch(HookPayload::new(
+                        session.conversation_id,
+                        turn.cwd.clone(),
+                        HookEvent::PostToolUseFailure {
+                            event: HookEventPostToolUseFailure {
+                                tool_name: hook_name.clone(),
+                                error: message.clone(),
+                            },
+                        },
+                        None,
+                        turn.approval_policy.to_string(),
+                    ))
+                    .await;
+                for msg in &failure_effect.system_messages {
+                    session
+                        .send_event(
+                            &turn,
+                            codex_protocol::protocol::EventMsg::Warning(
+                                codex_protocol::protocol::WarningEvent {
+                                    message: format!("[hook] {msg}"),
+                                },
+                            ),
+                        )
+                        .await;
+                }
+                Err(FunctionCallError::Fatal(message))
+            }
             Err(err) => {
                 dispatched_failure = true;
                 // Dispatch PostToolUseFailure hook (non-blockable).
