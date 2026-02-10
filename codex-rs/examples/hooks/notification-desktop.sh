@@ -21,7 +21,9 @@ if command -v notify-send &>/dev/null; then
     [ "$LEVEL" = "warn" ] && URGENCY="critical"
     notify-send -u "$URGENCY" "$TITLE" "$MESSAGE"
 elif command -v osascript &>/dev/null; then
-    osascript -e "display notification \"$MESSAGE\" with title \"$TITLE\""
+    # Escape single quotes for AppleScript
+    ESCAPED_MESSAGE=$(echo "$MESSAGE" | sed "s/'/\\\\'/g")
+    osascript -e "display notification '${ESCAPED_MESSAGE}' with title '${TITLE}'"
 fi
 
 exit 0

@@ -1189,8 +1189,9 @@ impl Session {
         // record_initial_history can emit events. We record only after the SessionConfiguredEvent is emitted.
         sess.record_initial_history(initial_history).await;
 
-        // Dispatch SessionStart hook (non-blockable, informational only).
-        sess.hooks()
+        // Dispatch SessionStart hook and apply any env vars it produces.
+        let session_start_effect = sess
+            .hooks()
             .dispatch(HookPayload::new(
                 conversation_id,
                 session_configuration.cwd.clone(),
@@ -1205,6 +1206,14 @@ impl Session {
                 session_configuration.approval_policy.to_string(),
             ))
             .await;
+
+        if !session_start_effect.env_vars.is_empty() {
+            tracing::info!(
+                count = session_start_effect.env_vars.len(),
+                "Applying env vars from SessionStart hooks"
+            );
+            sess.set_dependency_env(session_start_effect.env_vars).await;
+        }
 
         Ok(sess)
     }

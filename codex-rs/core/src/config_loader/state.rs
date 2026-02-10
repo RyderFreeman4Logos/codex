@@ -210,8 +210,17 @@ impl ConfigLayerStack {
         for layer in self.get_layers(ConfigLayerStackOrdering::LowestPrecedenceFirst, false) {
             if let Some(hooks_table) = layer.config.as_table().and_then(|t| t.get("hooks")) {
                 // Try to deserialize the hooks section from this layer
-                if let Ok(layer_hooks) = hooks_table.clone().try_into::<HooksConfigToml>() {
-                    merged.merge_from(layer_hooks);
+                match hooks_table.clone().try_into::<HooksConfigToml>() {
+                    Ok(layer_hooks) => {
+                        merged.merge_from(layer_hooks);
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            layer_source = ?layer.name,
+                            error = %e,
+                            "Failed to deserialize hooks config from layer, skipping"
+                        );
+                    }
                 }
             }
         }

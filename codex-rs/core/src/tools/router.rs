@@ -2,11 +2,11 @@ use crate::client_common::tools::ToolSpec;
 use crate::codex::Session;
 use crate::codex::TurnContext;
 use crate::function_tool::FunctionCallError;
+use crate::hooks::EffectAction;
 use crate::hooks::HookEvent;
 use crate::hooks::HookEventPostToolUse;
 use crate::hooks::HookEventPostToolUseFailure;
 use crate::hooks::HookEventPreToolUse;
-use crate::hooks::EffectAction;
 use crate::hooks::HookPayload;
 use crate::sandboxing::SandboxPermissions;
 use crate::tools::context::SharedTurnDiffTracker;
@@ -35,7 +35,11 @@ use tracing::instrument;
 /// under.
 fn hook_tool_name(internal_name: &str) -> String {
     match internal_name {
-        "local_shell" => "Bash".to_string(),
+        // All shell execution variants map to "Bash"
+        "local_shell" | "shell" | "container.exec" | "shell_command" | "exec_command" => {
+            "Bash".to_string()
+        }
+        // Other tools (MCP, custom, function tools) pass through unchanged
         other => other.to_string(),
     }
 }
@@ -203,7 +207,7 @@ impl ToolRouter {
         }
 
         match pre_outcome.action {
-            EffectAction::Proceed | EffectAction::StopProcessing => {
+            EffectAction::Proceed => {
                 // If a hook returned Modify, apply the modified content.
                 if let Some(content) = pre_outcome.modified_content {
                     match &mut payload {
@@ -369,5 +373,195 @@ impl ToolRouter {
                 },
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_hook_tool_name_shell_variants() {
+        // All shell execution variants should map to "Bash"
+        assert_eq!(hook_tool_name("local_shell"), "Bash");
+        assert_eq!(hook_tool_name("shell"), "Bash");
+        assert_eq!(hook_tool_name("container.exec"), "Bash");
+        assert_eq!(hook_tool_name("shell_command"), "Bash");
+        assert_eq!(hook_tool_name("exec_command"), "Bash");
+    }
+
+    #[test]
+    fn test_hook_tool_name_passthrough() {
+        // Non-shell tools should pass through unchanged
+        assert_eq!(hook_tool_name("read_file"), "read_file");
+        assert_eq!(hook_tool_name("write_stdin"), "write_stdin");
+        assert_eq!(hook_tool_name("apply_patch"), "apply_patch");
+        assert_eq!(hook_tool_name("grep_files"), "grep_files");
+        assert_eq!(hook_tool_name("list_dir"), "list_dir");
+        assert_eq!(hook_tool_name("view_image"), "view_image");
+
+        // MCP tools should pass through with their full qualified names
+        assert_eq!(hook_tool_name("mcp__server__tool"), "mcp__server__tool");
+
+        // Custom tools should pass through
+        assert_eq!(hook_tool_name("custom_tool"), "custom_tool");
+    }
+
+    #[test]
+    fn test_hook_input_local_shell() {
+        let payload = ToolPayload::LocalShell {
+            params: ShellToolCallParams {
+                command: vec!["ls".to_string(), "-la".to_string()],
+                workdir: Some("/tmp".into()),
+                timeout_ms: Some(5000),
+                sandbox_permissions: Some(SandboxPermissions::UseDefault),
+                prefix_rule: None,
+                justification: None,
+            },
+        };
+
+        let input = payload.hook_input();
+        assert!(input.is_object());
+
+        // Should contain command field as array
+        assert_eq!(
+            input.get("command"),
+            Some(&serde_json::json!(["ls", "-la"]))
+        );
+
+        // Should contain workdir field
+        assert_eq!(
+            input.get("workdir"),
+            Some(&serde_json::json!("/tmp"))
+        );
+
+        // Should contain timeout_ms field
+        assert_eq!(
+            input.get("timeout_ms"),
+            Some(&serde_json::json!(5000))
+        );
+    }
+
+    #[test]
+    fn test_hook_input_local_shell_minimal() {
+        let payload = ToolPayload::LocalShell {
+            params: ShellToolCallParams {
+                command: vec!["echo".to_string(), "test".to_string()],
+                workdir: None,
+                timeout_ms: None,
+                sandbox_permissions: Some(SandboxPermissions::UseDefault),
+                prefix_rule: None,
+                justification: None,
+            },
+        };
+
+        let input = payload.hook_input();
+        assert!(input.is_object());
+
+        // Should contain command field
+        assert_eq!(
+            input.get("command"),
+            Some(&serde_json::json!(["echo", "test"]))
+        );
+
+        // workdir and timeout_ms should not be present when None
+        assert_eq!(input.get("workdir"), None);
+        assert_eq!(input.get("timeout_ms"), None);
+    }
+
+    #[test]
+    fn test_hook_input_function_valid_json() {
+        let payload = ToolPayload::Function {
+            arguments: r#"{"path": "/tmp/test.txt", "mode": "read"}"#.to_string(),
+        };
+
+        let input = payload.hook_input();
+
+        // Function arguments should be parsed as JSON object
+        assert!(input.is_object());
+        assert_eq!(
+            input.get("path"),
+            Some(&serde_json::json!("/tmp/test.txt"))
+        );
+        assert_eq!(
+            input.get("mode"),
+            Some(&serde_json::json!("read"))
+        );
+    }
+
+    #[test]
+    fn test_hook_input_function_invalid_json() {
+        let payload = ToolPayload::Function {
+            arguments: "not valid json".to_string(),
+        };
+
+        let input = payload.hook_input();
+
+        // Invalid JSON should fallback to string
+        assert_eq!(input, serde_json::json!("not valid json"));
+    }
+
+    #[test]
+    fn test_hook_input_custom_valid_json() {
+        let payload = ToolPayload::Custom {
+            input: r#"{"action": "patch", "content": "diff"}"#.to_string(),
+        };
+
+        let input = payload.hook_input();
+
+        // Custom input should be parsed as JSON object
+        assert!(input.is_object());
+        assert_eq!(
+            input.get("action"),
+            Some(&serde_json::json!("patch"))
+        );
+    }
+
+    #[test]
+    fn test_hook_input_custom_invalid_json() {
+        let payload = ToolPayload::Custom {
+            input: "plain text input".to_string(),
+        };
+
+        let input = payload.hook_input();
+
+        // Invalid JSON should fallback to string
+        assert_eq!(input, serde_json::json!("plain text input"));
+    }
+
+    #[test]
+    fn test_hook_input_mcp_valid_json() {
+        let payload = ToolPayload::Mcp {
+            server: "test-server".to_string(),
+            tool: "test-tool".to_string(),
+            raw_arguments: r#"{"key": "value", "number": 42}"#.to_string(),
+        };
+
+        let input = payload.hook_input();
+
+        // MCP arguments should be parsed as JSON object
+        assert!(input.is_object());
+        assert_eq!(
+            input.get("key"),
+            Some(&serde_json::json!("value"))
+        );
+        assert_eq!(
+            input.get("number"),
+            Some(&serde_json::json!(42))
+        );
+    }
+
+    #[test]
+    fn test_hook_input_mcp_invalid_json() {
+        let payload = ToolPayload::Mcp {
+            server: "test-server".to_string(),
+            tool: "test-tool".to_string(),
+            raw_arguments: "invalid".to_string(),
+        };
+
+        let input = payload.hook_input();
+
+        // Invalid JSON should fallback to string
+        assert_eq!(input, serde_json::json!("invalid"));
     }
 }

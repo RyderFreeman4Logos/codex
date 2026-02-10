@@ -24,17 +24,9 @@ pub(crate) struct Hooks {
     after_agent: Vec<Hook>,
     pre_tool_use: Vec<Hook>,
     post_tool_use: Vec<Hook>,
-    stop: Vec<Hook>,
-    user_prompt_submit: Vec<Hook>,
-    notification: Vec<Hook>,
     session_start: Vec<Hook>,
     session_end: Vec<Hook>,
-    permission_request: Vec<Hook>,
     post_tool_use_failure: Vec<Hook>,
-    subagent_start: Vec<Hook>,
-    subagent_stop: Vec<Hook>,
-    pre_compact: Vec<Hook>,
-    task_completed: Vec<Hook>,
     /// Semaphore to limit concurrent hook executions.
     semaphore: Arc<Semaphore>,
     /// Tracks which once-hooks have already fired (event_name + hook_index).
@@ -47,17 +39,9 @@ impl Default for Hooks {
             after_agent: Vec::new(),
             pre_tool_use: Vec::new(),
             post_tool_use: Vec::new(),
-            stop: Vec::new(),
-            user_prompt_submit: Vec::new(),
-            notification: Vec::new(),
             session_start: Vec::new(),
             session_end: Vec::new(),
-            permission_request: Vec::new(),
             post_tool_use_failure: Vec::new(),
-            subagent_start: Vec::new(),
-            subagent_stop: Vec::new(),
-            pre_compact: Vec::new(),
-            task_completed: Vec::new(),
             semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_HOOKS)),
             once_fired: Arc::new(Mutex::new(HashSet::new())),
         }
@@ -105,21 +89,6 @@ impl Hooks {
             .iter()
             .flat_map(hooks_from_group)
             .collect();
-        let stop: Vec<Hook> = hooks_config
-            .stop
-            .iter()
-            .flat_map(hooks_from_group)
-            .collect();
-        let user_prompt_submit: Vec<Hook> = hooks_config
-            .user_prompt_submit
-            .iter()
-            .flat_map(hooks_from_group)
-            .collect();
-        let notification: Vec<Hook> = hooks_config
-            .notification
-            .iter()
-            .flat_map(hooks_from_group)
-            .collect();
         let session_start: Vec<Hook> = hooks_config
             .session_start
             .iter()
@@ -130,33 +99,8 @@ impl Hooks {
             .iter()
             .flat_map(hooks_from_group)
             .collect();
-        let permission_request: Vec<Hook> = hooks_config
-            .permission_request
-            .iter()
-            .flat_map(hooks_from_group)
-            .collect();
         let post_tool_use_failure: Vec<Hook> = hooks_config
             .post_tool_use_failure
-            .iter()
-            .flat_map(hooks_from_group)
-            .collect();
-        let subagent_start: Vec<Hook> = hooks_config
-            .subagent_start
-            .iter()
-            .flat_map(hooks_from_group)
-            .collect();
-        let subagent_stop: Vec<Hook> = hooks_config
-            .subagent_stop
-            .iter()
-            .flat_map(hooks_from_group)
-            .collect();
-        let pre_compact: Vec<Hook> = hooks_config
-            .pre_compact
-            .iter()
-            .flat_map(hooks_from_group)
-            .collect();
-        let task_completed: Vec<Hook> = hooks_config
-            .task_completed
             .iter()
             .flat_map(hooks_from_group)
             .collect();
@@ -171,55 +115,23 @@ impl Hooks {
         if !post_tool_use.is_empty() {
             tracing::info!(event = "post_tool_use", count = post_tool_use.len(), "Hooks loaded");
         }
-        if !stop.is_empty() {
-            tracing::info!(event = "stop", count = stop.len(), "Hooks loaded");
-        }
-        if !user_prompt_submit.is_empty() {
-            tracing::info!(event = "user_prompt_submit", count = user_prompt_submit.len(), "Hooks loaded");
-        }
-        if !notification.is_empty() {
-            tracing::info!(event = "notification", count = notification.len(), "Hooks loaded");
-        }
         if !session_start.is_empty() {
             tracing::info!(event = "session_start", count = session_start.len(), "Hooks loaded");
         }
         if !session_end.is_empty() {
             tracing::info!(event = "session_end", count = session_end.len(), "Hooks loaded");
         }
-        if !permission_request.is_empty() {
-            tracing::info!(event = "permission_request", count = permission_request.len(), "Hooks loaded");
-        }
         if !post_tool_use_failure.is_empty() {
             tracing::info!(event = "post_tool_use_failure", count = post_tool_use_failure.len(), "Hooks loaded");
-        }
-        if !subagent_start.is_empty() {
-            tracing::info!(event = "subagent_start", count = subagent_start.len(), "Hooks loaded");
-        }
-        if !subagent_stop.is_empty() {
-            tracing::info!(event = "subagent_stop", count = subagent_stop.len(), "Hooks loaded");
-        }
-        if !pre_compact.is_empty() {
-            tracing::info!(event = "pre_compact", count = pre_compact.len(), "Hooks loaded");
-        }
-        if !task_completed.is_empty() {
-            tracing::info!(event = "task_completed", count = task_completed.len(), "Hooks loaded");
         }
 
         Self {
             after_agent,
             pre_tool_use,
             post_tool_use,
-            stop,
-            user_prompt_submit,
-            notification,
             session_start,
             session_end,
-            permission_request,
             post_tool_use_failure,
-            subagent_start,
-            subagent_stop,
-            pre_compact,
-            task_completed,
             semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_HOOKS)),
             once_fired: Arc::new(Mutex::new(HashSet::new())),
         }
@@ -230,17 +142,9 @@ impl Hooks {
             HookEvent::AfterAgent { .. } => &self.after_agent,
             HookEvent::PreToolUse { .. } => &self.pre_tool_use,
             HookEvent::PostToolUse { .. } => &self.post_tool_use,
-            HookEvent::Stop { .. } => &self.stop,
-            HookEvent::UserPromptSubmit { .. } => &self.user_prompt_submit,
-            HookEvent::Notification { .. } => &self.notification,
             HookEvent::SessionStart { .. } => &self.session_start,
             HookEvent::SessionEnd { .. } => &self.session_end,
-            HookEvent::PermissionRequest { .. } => &self.permission_request,
             HookEvent::PostToolUseFailure { .. } => &self.post_tool_use_failure,
-            HookEvent::SubagentStart { .. } => &self.subagent_start,
-            HookEvent::SubagentStop { .. } => &self.subagent_stop,
-            HookEvent::PreCompact { .. } => &self.pre_compact,
-            HookEvent::TaskCompleted { .. } => &self.task_completed,
         }
     }
 
@@ -267,7 +171,7 @@ impl Hooks {
     /// - System messages, stop reasons, status messages, and suppress_output
     ///   flags are collected from all hooks in config order.
     /// - Otherwise the action is `Proceed`.
-    pub(crate) async fn dispatch(&self, mut hook_payload: HookPayload) -> HookAggregateEffect {
+    pub(crate) async fn dispatch(&self, hook_payload: HookPayload) -> HookAggregateEffect {
         let hooks = self.hooks_for_event(&hook_payload.hook_event);
         if hooks.is_empty() {
             return HookAggregateEffect::default();
@@ -276,21 +180,7 @@ impl Hooks {
         let event_name = &hook_payload.hook_event_name;
         tracing::debug!(event = %event_name, hook_count = hooks.len(), "Dispatching hooks");
 
-        // Create temporary env file for SessionStart hooks
-        let _env_file_guard = if matches!(hook_payload.hook_event, HookEvent::SessionStart { .. }) {
-            match tempfile::NamedTempFile::new() {
-                Ok(file) => {
-                    hook_payload.env_file_path = Some(file.path().to_path_buf());
-                    Some(file)
-                }
-                Err(err) => {
-                    tracing::warn!("failed to create env file for SessionStart hook: {err}");
-                    None
-                }
-            }
-        } else {
-            None
-        };
+        let is_session_start = matches!(hook_payload.hook_event, HookEvent::SessionStart { .. });
 
         // Filter hooks based on once tracking and separate sync/async.
         let mut sync_hooks_with_idx = Vec::new();
@@ -350,15 +240,54 @@ impl Hooks {
 
         let semaphore = &self.semaphore;
         let payload_ref = &hook_payload;
-        let results: Vec<(usize, HookResult)> =
+
+        // For SessionStart, each hook gets its own env file to avoid
+        // concurrent writes to a shared temp file.
+        let results: Vec<(usize, HookResult)> = if is_session_start {
+            // Create per-hook env files so concurrent hooks don't clobber each other.
+            let mut env_file_guards: Vec<Option<tempfile::NamedTempFile>> =
+                Vec::with_capacity(sync_hooks_with_idx.len());
+            let mut per_hook_payloads: Vec<HookPayload> =
+                Vec::with_capacity(sync_hooks_with_idx.len());
+
+            for _ in &sync_hooks_with_idx {
+                let mut p = hook_payload.clone();
+                match tempfile::NamedTempFile::new() {
+                    Ok(file) => {
+                        p.env_file_path = Some(file.path().to_path_buf());
+                        env_file_guards.push(Some(file));
+                    }
+                    Err(err) => {
+                        tracing::warn!("failed to create per-hook env file: {err}");
+                        env_file_guards.push(None);
+                    }
+                }
+                per_hook_payloads.push(p);
+            }
+
+            let payloads_ref = &per_hook_payloads;
+            futures::future::join_all(
+                sync_hooks_with_idx
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (idx, hook))| async move {
+                        let Ok(_permit) = semaphore.acquire().await else {
+                            return (*idx, HookResult::default());
+                        };
+                        (*idx, hook.execute(&payloads_ref[i]).await)
+                    }),
+            )
+            .await
+            // env_file_guards dropped here, cleaning up temp files
+        } else {
             futures::future::join_all(sync_hooks_with_idx.iter().map(|(idx, hook)| async move {
-                // Semaphore is never closed during dispatch, so acquire always succeeds.
                 let Ok(_permit) = semaphore.acquire().await else {
                     return (*idx, HookResult::default());
                 };
                 (*idx, hook.execute(payload_ref).await)
             }))
-            .await;
+            .await
+        };
 
         // Aggregate results in config order (deterministic).
         let mut effect = HookAggregateEffect::default();

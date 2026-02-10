@@ -18,7 +18,7 @@ TOOL_INPUT=$(echo "$PAYLOAD" | jq -r '.tool_input // empty')
 
 # Example: block dangerous commands
 if [ "$TOOL_NAME" = "Bash" ]; then
-    COMMAND=$(echo "$TOOL_INPUT" | jq -r '.command // empty')
+    COMMAND=$(echo "$TOOL_INPUT" | jq -r '.command | if type == "array" then join(" ") else . end')
 
     # Block rm -rf / and similar dangerous patterns
     if echo "$COMMAND" | grep -qE '^\s*rm\s+-rf\s+/\s*$'; then

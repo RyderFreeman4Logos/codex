@@ -188,26 +188,4 @@ mod tests {
         assert_eq!(actual, expected);
         Ok(())
     }
-
-    #[test]
-    fn legacy_notify_json_for_stop_returns_event_serialized_directly() -> Result<()> {
-        use super::super::types::HookEventStop;
-
-        let hook_event = HookEvent::Stop {
-            event: HookEventStop {
-                reason: "max_tokens".to_string(),
-            },
-        };
-
-        let serialized = legacy_notify_json(&hook_event, Path::new("/tmp"))?;
-        let actual: Value = serde_json::from_str(&serialized)?;
-
-        let expected = json!({
-            "event_type": "Stop",
-            "reason": "max_tokens",
-        });
-
-        assert_eq!(actual, expected);
-        Ok(())
-    }
 }

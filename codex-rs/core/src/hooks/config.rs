@@ -177,37 +177,13 @@ pub struct HooksConfigToml {
     pub post_tool_use: Vec<MatcherGroupToml>,
 
     #[serde(default)]
-    pub notification: Vec<MatcherGroupToml>,
-
-    #[serde(default)]
-    pub stop: Vec<MatcherGroupToml>,
-
-    #[serde(default)]
-    pub user_prompt_submit: Vec<MatcherGroupToml>,
-
-    #[serde(default)]
     pub session_start: Vec<MatcherGroupToml>,
 
     #[serde(default)]
     pub session_end: Vec<MatcherGroupToml>,
 
     #[serde(default)]
-    pub permission_request: Vec<MatcherGroupToml>,
-
-    #[serde(default)]
     pub post_tool_use_failure: Vec<MatcherGroupToml>,
-
-    #[serde(default)]
-    pub subagent_start: Vec<MatcherGroupToml>,
-
-    #[serde(default)]
-    pub subagent_stop: Vec<MatcherGroupToml>,
-
-    #[serde(default)]
-    pub pre_compact: Vec<MatcherGroupToml>,
-
-    #[serde(default)]
-    pub task_completed: Vec<MatcherGroupToml>,
 }
 
 impl HooksConfigToml {
@@ -220,47 +196,28 @@ impl HooksConfigToml {
         self.after_agent.extend(other.after_agent);
         self.pre_tool_use.extend(other.pre_tool_use);
         self.post_tool_use.extend(other.post_tool_use);
-        self.notification.extend(other.notification);
-        self.stop.extend(other.stop);
-        self.user_prompt_submit.extend(other.user_prompt_submit);
         self.session_start.extend(other.session_start);
         self.session_end.extend(other.session_end);
-        self.permission_request.extend(other.permission_request);
         self.post_tool_use_failure.extend(other.post_tool_use_failure);
-        self.subagent_start.extend(other.subagent_start);
-        self.subagent_stop.extend(other.subagent_stop);
-        self.pre_compact.extend(other.pre_compact);
-        self.task_completed.extend(other.task_completed);
     }
 }
 
 /// Extract the field that the matcher regex should match against for a given event.
 ///
 /// Different event types have different matchable fields:
-/// - PreToolUse/PostToolUse/PostToolUseFailure/PermissionRequest → tool_name
+/// - PreToolUse/PostToolUse/PostToolUseFailure → tool_name
 /// - SessionStart → source
 /// - SessionEnd → reason
-/// - Notification → level (used as notification_type)
-/// - SubagentStart/SubagentStop → agent_type
-/// - PreCompact → trigger
-/// - AfterAgent/UserPromptSubmit/Stop/TaskCompleted → None (matcher not supported)
+/// - AfterAgent → None (matcher not supported)
 fn matcher_field_for_event(event: &super::types::HookEvent) -> Option<&str> {
     use super::types::HookEvent;
     match event {
         HookEvent::PreToolUse { event } => Some(&event.tool_name),
         HookEvent::PostToolUse { event } => Some(&event.tool_name),
         HookEvent::PostToolUseFailure { event } => Some(&event.tool_name),
-        HookEvent::PermissionRequest { event } => Some(&event.tool_name),
         HookEvent::SessionStart { event } => Some(&event.source),
         HookEvent::SessionEnd { event } => Some(&event.reason),
-        HookEvent::Notification { event } => Some(&event.level),
-        HookEvent::SubagentStart { event } => Some(&event.agent_type),
-        HookEvent::SubagentStop { event } => Some(&event.agent_type),
-        HookEvent::PreCompact { event } => Some(&event.trigger),
-        HookEvent::AfterAgent { .. }
-        | HookEvent::UserPromptSubmit { .. }
-        | HookEvent::Stop { .. }
-        | HookEvent::TaskCompleted { .. } => None,
+        HookEvent::AfterAgent { .. } => None,
     }
 }
 
@@ -555,17 +512,9 @@ mod tests {
         assert!(config.after_agent.is_empty());
         assert!(config.pre_tool_use.is_empty());
         assert!(config.post_tool_use.is_empty());
-        assert!(config.notification.is_empty());
-        assert!(config.stop.is_empty());
-        assert!(config.user_prompt_submit.is_empty());
         assert!(config.session_start.is_empty());
         assert!(config.session_end.is_empty());
-        assert!(config.permission_request.is_empty());
         assert!(config.post_tool_use_failure.is_empty());
-        assert!(config.subagent_start.is_empty());
-        assert!(config.subagent_stop.is_empty());
-        assert!(config.pre_compact.is_empty());
-        assert!(config.task_completed.is_empty());
     }
 
     #[test]
@@ -717,22 +666,22 @@ mod tests {
             [[post_tool_use]]
             command = ["./post-tool.sh"]
 
-            [[notification]]
-            command = ["./notify-desktop.sh"]
+            [[session_start]]
+            command = ["./on-start.sh"]
 
-            [[stop]]
-            command = ["./cleanup.sh"]
+            [[session_end]]
+            command = ["./on-end.sh"]
 
-            [[user_prompt_submit]]
-            command = ["./log-prompt.sh"]
+            [[post_tool_use_failure]]
+            command = ["./on-failure.sh"]
         "#;
         let config: HooksConfigToml = toml::from_str(toml_str).unwrap();
         assert_eq!(config.after_agent.len(), 1);
         assert_eq!(config.pre_tool_use.len(), 1);
         assert_eq!(config.post_tool_use.len(), 1);
-        assert_eq!(config.notification.len(), 1);
-        assert_eq!(config.stop.len(), 1);
-        assert_eq!(config.user_prompt_submit.len(), 1);
+        assert_eq!(config.session_start.len(), 1);
+        assert_eq!(config.session_end.len(), 1);
+        assert_eq!(config.post_tool_use_failure.len(), 1);
     }
 
     #[test]
@@ -812,36 +761,13 @@ mod tests {
             [[session_end]]
             command = ["./on-end.sh"]
 
-            [[permission_request]]
-            command = ["./on-permission.sh"]
-            matcher = "^Bash$"
-
             [[post_tool_use_failure]]
             command = ["./on-failure.sh"]
-
-            [[subagent_start]]
-            command = ["./on-subagent.sh"]
-            matcher = "researcher.*"
-
-            [[subagent_stop]]
-            command = ["./on-subagent-stop.sh"]
-
-            [[pre_compact]]
-            command = ["./on-compact.sh"]
-            matcher = "auto"
-
-            [[task_completed]]
-            command = ["./on-task-done.sh"]
         "#;
         let config: HooksConfigToml = toml::from_str(toml_str).unwrap();
         assert_eq!(config.session_start.len(), 1);
         assert_eq!(config.session_end.len(), 1);
-        assert_eq!(config.permission_request.len(), 1);
         assert_eq!(config.post_tool_use_failure.len(), 1);
-        assert_eq!(config.subagent_start.len(), 1);
-        assert_eq!(config.subagent_stop.len(), 1);
-        assert_eq!(config.pre_compact.len(), 1);
-        assert_eq!(config.task_completed.len(), 1);
     }
 
     #[test]

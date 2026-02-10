@@ -112,27 +112,6 @@ pub(crate) struct HookEventPostToolUse {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) struct HookEventStop {
-    pub reason: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) struct HookEventUserPromptSubmit {
-    /// Called `prompt` in Claude Code wire protocol (was `user_message`).
-    #[serde(rename = "prompt")]
-    pub user_message: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) struct HookEventNotification {
-    pub message: String,
-    pub level: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "snake_case")]
 pub(crate) struct HookEventSessionStart {
     /// How the session was started (e.g. "cli", "api", "ide").
     pub source: String,
@@ -151,52 +130,11 @@ pub(crate) struct HookEventSessionEnd {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) struct HookEventPermissionRequest {
-    /// Tool name for which permission is requested.
-    pub tool_name: String,
-    /// The tool input/arguments as JSON.
-    pub tool_input: JsonValue,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "snake_case")]
 pub(crate) struct HookEventPostToolUseFailure {
     /// Tool name that failed.
     pub tool_name: String,
     /// Error message or output from the failed tool.
     pub error: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) struct HookEventSubagentStart {
-    /// Type of sub-agent being started.
-    pub agent_type: String,
-    /// Task description or identifier.
-    pub task: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) struct HookEventSubagentStop {
-    /// Type of sub-agent being stopped.
-    pub agent_type: String,
-    /// Reason for stopping.
-    pub reason: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) struct HookEventPreCompact {
-    /// What triggered the compact (e.g. "auto", "user", "context_limit").
-    pub trigger: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) struct HookEventTaskCompleted {
-    /// Summary of the completed task.
-    pub summary: String,
 }
 
 fn serialize_triggered_at<S>(value: &DateTime<Utc>, serializer: S) -> Result<S::Ok, S::Error>
@@ -206,6 +144,14 @@ where
     serializer.serialize_str(&value.to_rfc3339_opts(SecondsFormat::Secs, true))
 }
 
+/// Hook events dispatched at specific points in the Codex lifecycle.
+///
+/// Currently implemented events: AfterAgent, PreToolUse, PostToolUse,
+/// SessionStart, SessionEnd, PostToolUseFailure.
+///
+/// Additional variants (Stop, UserPromptSubmit, Notification, PermissionRequest,
+/// SubagentStart, SubagentStop, PreCompact, TaskCompleted) are planned for
+/// future implementation once dispatch sites are added.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "event_type", rename_all = "PascalCase")]
 pub(crate) enum HookEvent {
@@ -221,60 +167,17 @@ pub(crate) enum HookEvent {
         #[serde(flatten)]
         event: HookEventPostToolUse,
     },
-    #[allow(dead_code)] // Integration point in codex.rs agent loop requires separate PR.
-    Stop {
-        #[serde(flatten)]
-        event: HookEventStop,
-    },
-    #[allow(dead_code)] // Integration point requires architectural changes.
-    UserPromptSubmit {
-        #[serde(flatten)]
-        event: HookEventUserPromptSubmit,
-    },
-    #[allow(dead_code)] // Integration point requires architectural changes.
-    Notification {
-        #[serde(flatten)]
-        event: HookEventNotification,
-    },
-    #[allow(dead_code)] // Integration point requires architectural changes.
     SessionStart {
         #[serde(flatten)]
         event: HookEventSessionStart,
     },
-    #[allow(dead_code)] // Integration point requires architectural changes.
     SessionEnd {
         #[serde(flatten)]
         event: HookEventSessionEnd,
     },
-    #[allow(dead_code)] // Integration point requires architectural changes.
-    PermissionRequest {
-        #[serde(flatten)]
-        event: HookEventPermissionRequest,
-    },
-    #[allow(dead_code)] // Integration point requires architectural changes.
     PostToolUseFailure {
         #[serde(flatten)]
         event: HookEventPostToolUseFailure,
-    },
-    #[allow(dead_code)] // Integration point requires architectural changes.
-    SubagentStart {
-        #[serde(flatten)]
-        event: HookEventSubagentStart,
-    },
-    #[allow(dead_code)] // Integration point requires architectural changes.
-    SubagentStop {
-        #[serde(flatten)]
-        event: HookEventSubagentStop,
-    },
-    #[allow(dead_code)] // Integration point requires architectural changes.
-    PreCompact {
-        #[serde(flatten)]
-        event: HookEventPreCompact,
-    },
-    #[allow(dead_code)] // Integration point requires architectural changes.
-    TaskCompleted {
-        #[serde(flatten)]
-        event: HookEventTaskCompleted,
     },
 }
 
@@ -285,33 +188,18 @@ impl HookEvent {
             Self::AfterAgent { .. } => "AfterAgent",
             Self::PreToolUse { .. } => "PreToolUse",
             Self::PostToolUse { .. } => "PostToolUse",
-            Self::Stop { .. } => "Stop",
-            Self::UserPromptSubmit { .. } => "UserPromptSubmit",
-            Self::Notification { .. } => "Notification",
             Self::SessionStart { .. } => "SessionStart",
             Self::SessionEnd { .. } => "SessionEnd",
-            Self::PermissionRequest { .. } => "PermissionRequest",
             Self::PostToolUseFailure { .. } => "PostToolUseFailure",
-            Self::SubagentStart { .. } => "SubagentStart",
-            Self::SubagentStop { .. } => "SubagentStop",
-            Self::PreCompact { .. } => "PreCompact",
-            Self::TaskCompleted { .. } => "TaskCompleted",
         }
     }
 
     /// Whether this event type supports blocking (exit code 2 → Block).
     ///
     /// Non-blockable events treat exit code 2 as a warning and proceed.
-    /// Per Claude Code spec, only the following events are blockable:
-    /// PreToolUse, UserPromptSubmit, PermissionRequest, Stop.
+    /// Currently only PreToolUse is blockable among implemented events.
     pub(crate) fn is_blockable(&self) -> bool {
-        matches!(
-            self,
-            Self::PreToolUse { .. }
-                | Self::UserPromptSubmit { .. }
-                | Self::PermissionRequest { .. }
-                | Self::Stop { .. }
-        )
+        matches!(self, Self::PreToolUse { .. })
     }
 }
 
@@ -377,11 +265,6 @@ pub(crate) enum EffectAction {
     Proceed,
     /// Block the operation with a reason message.
     Block { reason: String },
-    /// Stop processing further hooks but proceed with the operation.
-    /// Maps to the Claude Code "skip" decision: remaining hooks are skipped
-    /// but the operation itself is not blocked.
-    #[allow(dead_code)] // Will be used when skip decision is wired up.
-    StopProcessing,
 }
 
 /// Aggregated effect from running all matching hooks for an event.
@@ -395,9 +278,6 @@ pub(crate) struct HookAggregateEffect {
     pub action: EffectAction,
     /// System messages collected from hook outputs (injected into conversation).
     pub system_messages: Vec<String>,
-    /// Additional context strings from hook outputs.
-    #[allow(dead_code)] // Will be populated when additional_context field is wired up.
-    pub additional_context: Vec<String>,
     /// Modified content from a Modify decision (raw string).
     /// When set, the caller should apply this as the new tool input/arguments.
     pub modified_content: Option<String>,
@@ -416,25 +296,11 @@ impl Default for HookAggregateEffect {
         Self {
             action: EffectAction::Proceed,
             system_messages: Vec::new(),
-            additional_context: Vec::new(),
             modified_content: None,
             suppress_output: false,
             stop_reason: None,
             status_messages: Vec::new(),
             env_vars: HashMap::new(),
-        }
-    }
-}
-
-impl HookAggregateEffect {
-    /// Create a Block effect with a reason.
-    #[allow(dead_code)] // Convenience constructor; direct construction is also valid.
-    pub fn block(reason: impl Into<String>) -> Self {
-        Self {
-            action: EffectAction::Block {
-                reason: reason.into(),
-            },
-            ..Default::default()
         }
     }
 }
@@ -570,65 +436,6 @@ mod tests {
     }
 
     #[test]
-    fn hook_event_stop_serializes_correctly() {
-        use super::HookEventStop;
-
-        let hook_event = HookEvent::Stop {
-            event: HookEventStop {
-                reason: "max_tokens_reached".to_string(),
-            },
-        };
-
-        let actual = serde_json::to_value(&hook_event).expect("serialize stop event");
-        let expected = json!({
-            "event_type": "Stop",
-            "reason": "max_tokens_reached",
-        });
-
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn hook_event_user_prompt_submit_serializes_correctly() {
-        use super::HookEventUserPromptSubmit;
-
-        let hook_event = HookEvent::UserPromptSubmit {
-            event: HookEventUserPromptSubmit {
-                user_message: "Help me debug this code".to_string(),
-            },
-        };
-
-        let actual = serde_json::to_value(&hook_event).expect("serialize user_prompt_submit event");
-        let expected = json!({
-            "event_type": "UserPromptSubmit",
-            "prompt": "Help me debug this code",
-        });
-
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn hook_event_notification_serializes_correctly() {
-        use super::HookEventNotification;
-
-        let hook_event = HookEvent::Notification {
-            event: HookEventNotification {
-                message: "Build completed successfully".to_string(),
-                level: "info".to_string(),
-            },
-        };
-
-        let actual = serde_json::to_value(&hook_event).expect("serialize notification event");
-        let expected = json!({
-            "event_type": "Notification",
-            "message": "Build completed successfully",
-            "level": "info",
-        });
-
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
     fn hook_event_session_start_serializes_correctly() {
         use super::HookEventSessionStart;
 
@@ -652,27 +459,6 @@ mod tests {
     }
 
     #[test]
-    fn hook_event_permission_request_serializes_correctly() {
-        use super::HookEventPermissionRequest;
-
-        let hook_event = HookEvent::PermissionRequest {
-            event: HookEventPermissionRequest {
-                tool_name: "Edit".to_string(),
-                tool_input: json!({"file_path": "/tmp/test.txt", "content": "new content"}),
-            },
-        };
-
-        let actual = serde_json::to_value(&hook_event).expect("serialize permission_request event");
-        let expected = json!({
-            "event_type": "PermissionRequest",
-            "tool_name": "Edit",
-            "tool_input": {"file_path": "/tmp/test.txt", "content": "new content"},
-        });
-
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
     fn hook_event_post_tool_use_failure_serializes_correctly() {
         use super::HookEventPostToolUseFailure;
 
@@ -689,86 +475,6 @@ mod tests {
             "event_type": "PostToolUseFailure",
             "tool_name": "Bash",
             "error": "Command failed with exit code 1",
-        });
-
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn hook_event_subagent_start_serializes_correctly() {
-        use super::HookEventSubagentStart;
-
-        let hook_event = HookEvent::SubagentStart {
-            event: HookEventSubagentStart {
-                agent_type: "rust-developer".to_string(),
-                task: "Implement authentication module".to_string(),
-            },
-        };
-
-        let actual = serde_json::to_value(&hook_event).expect("serialize subagent_start event");
-        let expected = json!({
-            "event_type": "SubagentStart",
-            "agent_type": "rust-developer",
-            "task": "Implement authentication module",
-        });
-
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn hook_event_subagent_stop_serializes_correctly() {
-        use super::HookEventSubagentStop;
-
-        let hook_event = HookEvent::SubagentStop {
-            event: HookEventSubagentStop {
-                agent_type: "rust-developer".to_string(),
-                reason: "task_completed".to_string(),
-            },
-        };
-
-        let actual = serde_json::to_value(&hook_event).expect("serialize subagent_stop event");
-        let expected = json!({
-            "event_type": "SubagentStop",
-            "agent_type": "rust-developer",
-            "reason": "task_completed",
-        });
-
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn hook_event_pre_compact_serializes_correctly() {
-        use super::HookEventPreCompact;
-
-        let hook_event = HookEvent::PreCompact {
-            event: HookEventPreCompact {
-                trigger: "context_limit".to_string(),
-            },
-        };
-
-        let actual = serde_json::to_value(&hook_event).expect("serialize pre_compact event");
-        let expected = json!({
-            "event_type": "PreCompact",
-            "trigger": "context_limit",
-        });
-
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn hook_event_task_completed_serializes_correctly() {
-        use super::HookEventTaskCompleted;
-
-        let hook_event = HookEvent::TaskCompleted {
-            event: HookEventTaskCompleted {
-                summary: "Successfully implemented user authentication".to_string(),
-            },
-        };
-
-        let actual = serde_json::to_value(&hook_event).expect("serialize task_completed event");
-        let expected = json!({
-            "event_type": "TaskCompleted",
-            "summary": "Successfully implemented user authentication",
         });
 
         assert_eq!(actual, expected);
@@ -976,164 +682,12 @@ mod protocol_compat_tests {
     }
 
     #[test]
-    fn user_prompt_submit_wire_format() {
-        let payload = create_test_payload(HookEvent::UserPromptSubmit {
-            event: HookEventUserPromptSubmit {
-                user_message: "Fix the authentication bug".to_string(),
-            },
-        });
-
-        let json: Value = serde_json::to_value(&payload).unwrap();
-        verify_common_fields(&json, "UserPromptSubmit");
-
-        // Wire format uses "prompt" not "user_message"
-        assert!(
-            json.get("user_message").is_none(),
-            "should use prompt field"
-        );
-        assert_eq!(json["prompt"], "Fix the authentication bug");
-    }
-
-    #[test]
-    fn stop_wire_format() {
-        let payload = create_test_payload(HookEvent::Stop {
-            event: HookEventStop {
-                reason: "user_cancelled".to_string(),
-            },
-        });
-
-        let json: Value = serde_json::to_value(&payload).unwrap();
-        verify_common_fields(&json, "Stop");
-
-        assert_eq!(json["reason"], "user_cancelled");
-    }
-
-    #[test]
-    fn permission_request_wire_format() {
-        let payload = create_test_payload(HookEvent::PermissionRequest {
-            event: HookEventPermissionRequest {
-                tool_name: "Edit".to_string(),
-                tool_input: json!({
-                    "file_path": "/tmp/config.toml",
-                    "old_string": "port = 8080",
-                    "new_string": "port = 8081"
-                }),
-            },
-        });
-
-        let json: Value = serde_json::to_value(&payload).unwrap();
-        verify_common_fields(&json, "PermissionRequest");
-
-        assert_eq!(json["tool_name"], "Edit");
-        assert!(json["tool_input"].is_object());
-        assert_eq!(json["tool_input"]["file_path"], "/tmp/config.toml");
-    }
-
-    #[test]
-    fn notification_wire_format() {
-        let payload = create_test_payload(HookEvent::Notification {
-            event: HookEventNotification {
-                message: "Build completed successfully".to_string(),
-                level: "info".to_string(),
-            },
-        });
-
-        let json: Value = serde_json::to_value(&payload).unwrap();
-        verify_common_fields(&json, "Notification");
-
-        assert_eq!(json["message"], "Build completed successfully");
-        assert_eq!(json["level"], "info");
-    }
-
-    #[test]
-    fn subagent_start_wire_format() {
-        let payload = create_test_payload(HookEvent::SubagentStart {
-            event: HookEventSubagentStart {
-                agent_type: "rust-developer".to_string(),
-                task: "Implement user authentication".to_string(),
-            },
-        });
-
-        let json: Value = serde_json::to_value(&payload).unwrap();
-        verify_common_fields(&json, "SubagentStart");
-
-        assert_eq!(json["agent_type"], "rust-developer");
-        assert_eq!(json["task"], "Implement user authentication");
-    }
-
-    #[test]
-    fn subagent_stop_wire_format() {
-        let payload = create_test_payload(HookEvent::SubagentStop {
-            event: HookEventSubagentStop {
-                agent_type: "rust-developer".to_string(),
-                reason: "task_completed".to_string(),
-            },
-        });
-
-        let json: Value = serde_json::to_value(&payload).unwrap();
-        verify_common_fields(&json, "SubagentStop");
-
-        assert_eq!(json["agent_type"], "rust-developer");
-        assert_eq!(json["reason"], "task_completed");
-    }
-
-    #[test]
-    fn pre_compact_wire_format() {
-        let payload = create_test_payload(HookEvent::PreCompact {
-            event: HookEventPreCompact {
-                trigger: "auto".to_string(),
-            },
-        });
-
-        let json: Value = serde_json::to_value(&payload).unwrap();
-        verify_common_fields(&json, "PreCompact");
-
-        assert_eq!(json["trigger"], "auto");
-    }
-
-    #[test]
-    fn task_completed_wire_format() {
-        let payload = create_test_payload(HookEvent::TaskCompleted {
-            event: HookEventTaskCompleted {
-                summary: "Implemented OAuth2 authentication".to_string(),
-            },
-        });
-
-        let json: Value = serde_json::to_value(&payload).unwrap();
-        verify_common_fields(&json, "TaskCompleted");
-
-        assert_eq!(json["summary"], "Implemented OAuth2 authentication");
-    }
-
-    #[test]
     fn blockable_events_correctly_identified() {
         // Blockable events (exit 2 → Block)
         assert!(HookEvent::PreToolUse {
             event: HookEventPreToolUse {
                 tool_name: "test".to_string(),
                 tool_input: json!({}),
-            }
-        }
-        .is_blockable());
-
-        assert!(HookEvent::UserPromptSubmit {
-            event: HookEventUserPromptSubmit {
-                user_message: "test".to_string(),
-            }
-        }
-        .is_blockable());
-
-        assert!(HookEvent::PermissionRequest {
-            event: HookEventPermissionRequest {
-                tool_name: "test".to_string(),
-                tool_input: json!({}),
-            }
-        }
-        .is_blockable());
-
-        assert!(HookEvent::Stop {
-            event: HookEventStop {
-                reason: "test".to_string(),
             }
         }
         .is_blockable());
@@ -1170,6 +724,14 @@ mod protocol_compat_tests {
         assert!(!HookEvent::SessionEnd {
             event: HookEventSessionEnd {
                 reason: "test".to_string(),
+            }
+        }
+        .is_blockable());
+
+        assert!(!HookEvent::PostToolUseFailure {
+            event: HookEventPostToolUseFailure {
+                tool_name: "test".to_string(),
+                error: "error".to_string(),
             }
         }
         .is_blockable());

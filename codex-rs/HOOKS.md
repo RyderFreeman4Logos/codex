@@ -85,14 +85,16 @@ timeout = 30
 
 The `matcher` field uses regex patterns to filter which events trigger a hook. Different event types have different matchable fields:
 
-| Event Type | Matcher Field | Example |
-|------------|---------------|---------|
-| PreToolUse, PostToolUse, PostToolUseFailure, PermissionRequest | `tool_name` | `"^Bash$"` matches exactly "Bash" |
-| SessionStart | `source` | `"cli"` matches CLI sessions |
-| SessionEnd | `reason` | `"user_exit"` |
-| Notification | `level` | `"error"` matches error notifications |
-| SubagentStart, SubagentStop | `agent_type` | `"researcher.*"` |
-| PreCompact | `trigger` | `"auto"` matches auto-compaction |
+| Event Type | Matcher Field | Example | Status |
+|------------|---------------|---------|--------|
+| PreToolUse, PostToolUse, PostToolUseFailure | `tool_name` | `"^Bash$"` matches exactly "Bash" | ✅ Implemented |
+| SessionStart | `source` | `"cli"` matches CLI sessions | ✅ Implemented |
+| SessionEnd | `reason` | `"user_exit"` | ✅ Implemented |
+| AfterAgent | - | - | ✅ Implemented |
+| PermissionRequest | `tool_name` | `"^Edit$"` | 🚧 Planned |
+| Notification | `level` | `"error"` matches error notifications | 🚧 Planned |
+| SubagentStart, SubagentStop | `agent_type` | `"researcher.*"` | 🚧 Planned |
+| PreCompact | `trigger` | `"auto"` matches auto-compaction | 🚧 Planned |
 
 Special matcher values:
 - `None` (omitted) → matches all events
@@ -121,8 +123,8 @@ matcher = "*"
 
 ```toml
 [hooks]
-[[hooks.notification]]
-command = ["./notify-desktop.sh"]
+[[hooks.post_tool_use]]
+command = ["./log-tool.sh"]
 async = true  # Doesn't block execution
 ```
 
@@ -178,9 +180,9 @@ status_message = "Initializing session..."
 [[hooks.session_end]]
 command = ["./on-end.sh"]
 
-# Desktop notifications (fire-and-forget)
-[[hooks.notification]]
-command = ["./notify-desktop.sh"]
+# After agent turn completes
+[[hooks.after_agent]]
+command = ["./log-agent-turn.sh"]
 async = true
 
 # Group multiple hooks with same matcher
@@ -198,6 +200,10 @@ async = true
 
 ## Events Reference
 
+### Currently Implemented Events
+
+The following 6 events are **currently implemented and fully functional**:
+
 | Event | Config Key | Blockable | Matcher Field | Description |
 |-------|-----------|-----------|---------------|-------------|
 | PreToolUse | `pre_tool_use` | ✅ Yes | `tool_name` | Before tool execution |
@@ -206,6 +212,17 @@ async = true
 | AfterAgent | `after_agent` | ❌ No | - | After agent turn completes |
 | SessionStart | `session_start` | ❌ No | `source` | When session begins |
 | SessionEnd | `session_end` | ❌ No | `reason` | When session ends |
+
+**Blockable events**: These events can return `"decision": "block"` to prevent the operation from proceeding. Exit code 2 also blocks the operation.
+
+**Non-blockable events**: These events are observational only. They cannot block operations, but can inject system messages or collect metadata.
+
+### Planned Events (Not Yet Implemented)
+
+The following 8 events are **planned for future implementation**:
+
+| Event | Config Key | Blockable | Matcher Field | Description |
+|-------|-----------|-----------|---------------|-------------|
 | UserPromptSubmit | `user_prompt_submit` | ✅ Yes | - | When user submits a prompt |
 | Stop | `stop` | ✅ Yes | - | When stop is requested |
 | PermissionRequest | `permission_request` | ✅ Yes | `tool_name` | Before permission dialog |
@@ -214,10 +231,6 @@ async = true
 | SubagentStop | `subagent_stop` | ❌ No | `agent_type` | When subagent stops |
 | PreCompact | `pre_compact` | ❌ No | `trigger` | Before context compaction |
 | TaskCompleted | `task_completed` | ❌ No | - | When task completes |
-
-**Blockable events**: These events can return `"decision": "block"` to prevent the operation from proceeding. Exit code 2 also blocks the operation.
-
-**Non-blockable events**: These events are observational only. They cannot block operations, but can inject system messages or collect metadata.
 
 ## Hook Input (stdin JSON)
 
@@ -251,7 +264,9 @@ When a hook is executed, Codex sends a JSON payload on stdin containing event co
 
 ### Event-Specific Fields
 
-Event-specific fields are **flattened** into the top level (no nesting):
+Event-specific fields are **flattened** into the top level (no nesting).
+
+#### Currently Implemented Events
 
 **PreToolUse:**
 ```json
@@ -278,6 +293,13 @@ Event-specific fields are **flattened** into the top level (no nesting):
 }
 ```
 
+**AfterAgent:**
+```json
+{
+  "turn_number": 5
+}
+```
+
 **SessionStart:**
 ```json
 {
@@ -294,11 +316,21 @@ Event-specific fields are **flattened** into the top level (no nesting):
 }
 ```
 
-**Notification:**
+#### Planned Events (Not Yet Implemented)
+
+The following event payloads are documented for future implementation:
+
+**UserPromptSubmit:**
 ```json
 {
-  "message": "Build completed successfully",
-  "level": "info"
+  "prompt": "Help me debug this code"
+}
+```
+
+**Stop:**
+```json
+{
+  "reason": "user_request"
 }
 ```
 
@@ -307,6 +339,14 @@ Event-specific fields are **flattened** into the top level (no nesting):
 {
   "tool_name": "Edit",
   "tool_input": {"file_path": "/tmp/test.txt"}
+}
+```
+
+**Notification:**
+```json
+{
+  "message": "Build completed successfully",
+  "level": "info"
 }
 ```
 
@@ -340,20 +380,6 @@ Event-specific fields are **flattened** into the top level (no nesting):
 }
 ```
 
-**UserPromptSubmit:**
-```json
-{
-  "prompt": "Help me debug this code"
-}
-```
-
-**Stop:**
-```json
-{
-  "reason": "user_request"
-}
-```
-
 ## Hook Output (stdout JSON)
 
 Hooks communicate their decision back to Codex by writing JSON to stdout. The structure depends on whether the event is blockable:
@@ -377,7 +403,9 @@ Default behavior if no decision is returned or on non-zero exit code for non-blo
 }
 ```
 
-Only valid for **blockable events** (PreToolUse, UserPromptSubmit, PermissionRequest, Stop). For non-blockable events, this is treated as an error.
+Only valid for **blockable events** (currently: PreToolUse). For non-blockable events, this is treated as an error.
+
+**Note**: Additional blockable events (UserPromptSubmit, PermissionRequest, Stop) are planned for future implementation.
 
 #### Modify (Change Input/Output)
 
@@ -455,6 +483,14 @@ echo '{"decision": "proceed"}'
 exit 0
 ```
 
+**Important notes about SessionStart env files:**
+
+- **Per-hook isolation**: Each SessionStart hook receives its own unique temporary env file path to avoid concurrent write conflicts when multiple hooks run in parallel.
+- **Aggregation**: After all SessionStart hooks complete, Codex reads all env files and merges the variables.
+- **Session environment**: The aggregated variables are applied to the session environment and become available to all subsequent shell commands executed via the Bash tool.
+- **Async hooks**: Async (fire-and-forget) hooks do NOT participate in env file aggregation because they may not complete before the session needs the variables.
+- **Cleanup**: Temporary env files are automatically cleaned up after aggregation.
+
 ## Examples
 
 Example hook scripts are available in the `examples/hooks/` directory:
@@ -512,7 +548,36 @@ esac
 echo '{"decision": "proceed"}'
 ```
 
-### 3. Desktop Notifications (`notification-desktop.sh`)
+### 3. After Agent Turn Logger (`after-agent-logger.sh`)
+
+Logs agent turn completions and metrics (async):
+
+```bash
+#!/usr/bin/env bash
+PAYLOAD=$(cat)
+SESSION_ID=$(echo "$PAYLOAD" | jq -r '.session_id')
+TURN_NUMBER=$(echo "$PAYLOAD" | jq -r '.turn_number // "unknown"')
+
+LOG_FILE="${CODEX_PROJECT_DIR}/.codex/logs/agent-turns.log"
+mkdir -p "$(dirname "$LOG_FILE")"
+
+echo "[$(date)] SESSION $SESSION_ID: Agent turn #$TURN_NUMBER completed" >> "$LOG_FILE"
+
+exit 0
+```
+
+Configuration for async logging hook:
+
+```toml
+[hooks]
+[[hooks.after_agent]]
+command = ["bash", "./examples/hooks/after-agent-logger.sh"]
+async = true
+```
+
+### 4. Desktop Notifications (Planned - `notification-desktop.sh`)
+
+**Note**: The `notification` event is not yet implemented. This example is for future use.
 
 Forwards notifications to desktop notification system (async):
 
@@ -532,7 +597,7 @@ fi
 exit 0
 ```
 
-Configuration for async notification hook:
+Configuration for async notification hook (when implemented):
 
 ```toml
 [hooks]
@@ -596,6 +661,14 @@ echo "$PAYLOAD" | jq '.' >&2
 echo '{"decision": "proceed"}'
 exit 0
 ```
+
+## Security Considerations
+
+- **Hook scripts bypass the sandbox**: Hook commands execute outside the Codex sandbox. They run with the same permissions as the Codex process itself and are not subject to tool-level approval policies.
+- **Environment variable exposure**: SessionStart hooks receive a `CLAUDE_ENV_FILE` path. Values written to this file are injected into subsequent shell command environments. Hook authors should avoid writing secrets to this file unless the downstream commands require them.
+- **Debug log sensitivity**: Hook payloads are logged at `debug` level via `tracing`. In production deployments, ensure debug-level logging is not enabled if hook payloads may contain sensitive data (e.g. tool arguments with credentials).
+- **Hook output is trusted**: The system trusts hook stdout JSON (decisions, modified content, system messages). A compromised hook script could inject arbitrary tool arguments via `Modify` decisions or block legitimate operations.
+- **Temp file cleanup**: Per-hook temporary env files are cleaned up when the dispatch function returns. Async (fire-and-forget) hooks do not participate in env file aggregation.
 
 ## Claude Code Compatibility
 

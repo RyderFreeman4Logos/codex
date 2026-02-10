@@ -25,6 +25,28 @@ const MAX_STDERR_BYTES: usize = 1_048_576; // 1MB
 /// - First = splits key and value
 /// - Returns empty HashMap if file doesn't exist or can't be read
 fn parse_env_file(path: &std::path::Path) -> HashMap<String, String> {
+    // Check file size first (max 1MB)
+    const MAX_FILE_SIZE: u64 = 1024 * 1024; // 1MB
+    const MAX_ENTRIES: usize = 1000;
+
+    match std::fs::metadata(path) {
+        Ok(metadata) => {
+            if metadata.len() > MAX_FILE_SIZE {
+                tracing::warn!(
+                    "env file {} exceeds max size ({}B > {}B), ignoring",
+                    path.display(),
+                    metadata.len(),
+                    MAX_FILE_SIZE
+                );
+                return HashMap::new();
+            }
+        }
+        Err(e) => {
+            tracing::debug!("failed to read metadata for {}: {}", path.display(), e);
+            return HashMap::new();
+        }
+    }
+
     let Ok(content) = std::fs::read_to_string(path) else {
         return HashMap::new();
     };
@@ -41,6 +63,7 @@ fn parse_env_file(path: &std::path::Path) -> HashMap<String, String> {
             let (key, value) = line.split_once('=')?;
             Some((key.trim().to_string(), value.trim().to_string()))
         })
+        .take(MAX_ENTRIES)
         .collect()
 }
 
@@ -53,24 +76,23 @@ pub(super) enum HookDecision {
     Modify,
 }
 
-/// Event-specific output from a hook command.
+/// Event-specific output from a hook command (Claude Code protocol extension).
+///
+/// These fields are part of the Claude Code wire protocol specification.
+/// They are deserialized for protocol completeness and logged at debug level.
+/// Full integration into Codex's aggregation logic is planned for future PRs.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct HookSpecificOutput {
-    #[serde(default)]
-    #[allow(dead_code)] // Used in P2-2.2 (HookAggregateEffect)
+    #[serde(default, rename = "hookEventName")]
     pub hook_event_name: Option<String>,
-    #[serde(default)]
-    #[allow(dead_code)] // Used in P2-2.2 (HookAggregateEffect)
+    #[serde(default, rename = "permissionDecision")]
     pub permission_decision: Option<String>,
-    #[serde(default)]
-    #[allow(dead_code)] // Used in P2-2.2 (HookAggregateEffect)
+    #[serde(default, rename = "permissionDecisionReason")]
     pub permission_decision_reason: Option<String>,
-    #[serde(default)]
-    #[allow(dead_code)] // Used in P2-2.2 (HookAggregateEffect)
+    #[serde(default, rename = "updatedInput")]
     pub updated_input: Option<serde_json::Value>,
-    #[serde(default)]
-    #[allow(dead_code)] // Used in P2-2.2 (HookAggregateEffect)
+    #[serde(default, rename = "additionalContext")]
     pub additional_context: Option<String>,
 }
 
@@ -100,9 +122,8 @@ pub(super) struct HookCommandOutput {
     /// System message to inject into the conversation.
     #[serde(default)]
     pub system_message: Option<String>,
-    /// Event-specific hook output.
+    /// Event-specific hook output (Claude Code protocol extension).
     #[serde(default)]
-    #[allow(dead_code)] // Used in P2-2.2 (HookAggregateEffect)
     pub hook_specific_output: Option<HookSpecificOutput>,
 }
 
@@ -112,6 +133,18 @@ fn default_decision() -> HookDecision {
 
 impl From<HookCommandOutput> for HookResult {
     fn from(output: HookCommandOutput) -> Self {
+        // Log protocol extension fields if present (consumed for wire
+        // format completeness; full aggregation integration planned).
+        if let Some(ref specific) = output.hook_specific_output {
+            tracing::debug!(
+                hook_event_name = ?specific.hook_event_name,
+                permission_decision = ?specific.permission_decision,
+                permission_decision_reason = ?specific.permission_decision_reason,
+                has_updated_input = specific.updated_input.is_some(),
+                additional_context = ?specific.additional_context,
+                "hook returned protocol extension fields"
+            );
+        }
         let meta = HookOutputMeta {
             system_message: output.system_message,
             stop_reason: output.stop_reason,
