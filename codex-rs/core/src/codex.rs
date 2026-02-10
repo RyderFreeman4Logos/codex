@@ -3493,6 +3493,9 @@ mod handlers {
         use crate::hooks::HookPayload;
 
         // Dispatch SessionEnd hook (non-blockable, informational only).
+        // This function is called exclusively from Op::Shutdown, which represents
+        // a user-initiated session termination. Other exit paths (e.g., agent errors,
+        // turn aborts) do not currently trigger SessionEnd hooks.
         let state = sess.state.lock().await;
         let cwd = state.session_configuration.cwd.clone();
         let approval_policy = state.session_configuration.approval_policy.to_string();

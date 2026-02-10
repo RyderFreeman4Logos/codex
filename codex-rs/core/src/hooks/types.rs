@@ -57,7 +57,11 @@ impl Hook {
             HookEvent::PostToolUseFailure { event } => regex.is_match(&event.tool_name),
             HookEvent::SessionStart { event } => regex.is_match(&event.source),
             HookEvent::SessionEnd { event } => regex.is_match(&event.reason),
-            HookEvent::AfterAgent { .. } => true, // No matchable field
+            HookEvent::AfterAgent { .. } => {
+                // AfterAgent has no matchable field, but a never-match
+                // regex (from invalid input) should still disable the hook.
+                regex.as_str() != r"[^\s\S]"
+            }
         }
     }
 }
