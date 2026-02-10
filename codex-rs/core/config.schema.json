@@ -155,6 +155,22 @@
         }
       ]
     },
+    "CommandSpec": {
+      "anyOf": [
+        {
+          "description": "Shell command string, executed via `sh -c` (or `cmd /C` on Windows).",
+          "type": "string"
+        },
+        {
+          "description": "Explicit argv array, executed directly.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      ],
+      "description": "Command specification supporting both shell string and argv formats.\n\n- Shell string: `command = \"bash ./check.sh\"` → executed via `sh -c \"bash ./check.sh\"` - Argv array: `command = [\"bash\", \"./check.sh\"]` → executed directly"
+    },
     "ConfigProfile": {
       "additionalProperties": false,
       "description": "Collection of common configuration options that a user can define as a unit in `config.toml`.",
@@ -411,24 +427,35 @@
         }
       ]
     },
-    "HookEntryToml": {
-      "description": "Single hook entry from configuration.",
+    "HookCommandToml": {
+      "description": "Single command in a matcher group (new grouped format).",
       "properties": {
-        "command": {
-          "description": "The command to execute as argv (program + args).",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
+        "async": {
+          "default": false,
+          "description": "If true, hook is spawned as fire-and-forget task (does not block dispatch). Serialized as \"async\" in TOML/JSON (renamed from async_execution).",
+          "type": "boolean"
         },
-        "matcher": {
+        "command": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/CommandSpec"
+            }
+          ],
+          "description": "The command to execute, either as a shell string or argv array."
+        },
+        "once": {
+          "default": false,
+          "description": "When true, this hook only executes once per session.",
+          "type": "boolean"
+        },
+        "status_message": {
           "default": null,
-          "description": "Optional matcher pattern for tool-use hooks.\n\nSupported patterns: - `\"*\"` matches any tool name - `\"prefix*\"` matches tool names starting with `prefix` - `\"exact\"` matches only that exact tool name\n\nNote: suffix patterns like `\"*shell\"` and infix patterns like `\"read_*_file\"` are **not** supported.",
+          "description": "Status message displayed while hook is executing.",
           "type": "string"
         },
         "timeout": {
-          "default": 30,
-          "description": "Optional timeout in seconds (default: 30).",
+          "default": 600,
+          "description": "Optional timeout in seconds (default: 600, matching Claude Code).",
           "format": "uint64",
           "minimum": 0.0,
           "type": "integer"
@@ -445,44 +472,155 @@
         "after_agent": {
           "default": [],
           "items": {
-            "$ref": "#/definitions/HookEntryToml"
+            "$ref": "#/definitions/MatcherGroupToml"
           },
           "type": "array"
+        },
+        "disable_all_hooks": {
+          "default": false,
+          "description": "When `true`, all hooks are disabled regardless of per-event entries.",
+          "type": "boolean"
         },
         "notification": {
           "default": [],
           "items": {
-            "$ref": "#/definitions/HookEntryToml"
+            "$ref": "#/definitions/MatcherGroupToml"
+          },
+          "type": "array"
+        },
+        "permission_request": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/MatcherGroupToml"
           },
           "type": "array"
         },
         "post_tool_use": {
           "default": [],
           "items": {
-            "$ref": "#/definitions/HookEntryToml"
+            "$ref": "#/definitions/MatcherGroupToml"
+          },
+          "type": "array"
+        },
+        "post_tool_use_failure": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/MatcherGroupToml"
+          },
+          "type": "array"
+        },
+        "pre_compact": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/MatcherGroupToml"
           },
           "type": "array"
         },
         "pre_tool_use": {
           "default": [],
           "items": {
-            "$ref": "#/definitions/HookEntryToml"
+            "$ref": "#/definitions/MatcherGroupToml"
+          },
+          "type": "array"
+        },
+        "session_end": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/MatcherGroupToml"
+          },
+          "type": "array"
+        },
+        "session_start": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/MatcherGroupToml"
           },
           "type": "array"
         },
         "stop": {
           "default": [],
           "items": {
-            "$ref": "#/definitions/HookEntryToml"
+            "$ref": "#/definitions/MatcherGroupToml"
+          },
+          "type": "array"
+        },
+        "subagent_start": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/MatcherGroupToml"
+          },
+          "type": "array"
+        },
+        "subagent_stop": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/MatcherGroupToml"
+          },
+          "type": "array"
+        },
+        "task_completed": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/MatcherGroupToml"
           },
           "type": "array"
         },
         "user_prompt_submit": {
           "default": [],
           "items": {
-            "$ref": "#/definitions/HookEntryToml"
+            "$ref": "#/definitions/MatcherGroupToml"
           },
           "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "MatcherGroupToml": {
+      "description": "Matcher group with optional pattern and multiple commands.\n\nSupports both new grouped format and old flat format for backward compatibility:\n\nNew format (recommended): ```toml [[pre_tool_use]] matcher = \"^Bash$\"\n\n[[pre_tool_use.commands]] command = [\"./hook1.sh\"] timeout = 30\n\n[[pre_tool_use.commands]] command = [\"./hook2.sh\"] ```\n\nOld format (backward compatible): ```toml [[pre_tool_use]] command = [\"./hook.sh\"] timeout = 60 matcher = \"^Bash$\" ```",
+      "properties": {
+        "async": {
+          "default": false,
+          "description": "If true, hook is spawned as fire-and-forget task (old flat format). Serialized as \"async\" in TOML/JSON (renamed from async_execution).",
+          "type": "boolean"
+        },
+        "command": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/CommandSpec"
+            }
+          ],
+          "default": null,
+          "description": "Single command (old flat format, for backward compatibility). If present, this group is treated as a single-command group."
+        },
+        "commands": {
+          "default": [],
+          "description": "Handler commands in this group (new grouped format).",
+          "items": {
+            "$ref": "#/definitions/HookCommandToml"
+          },
+          "type": "array"
+        },
+        "matcher": {
+          "default": null,
+          "description": "Optional regex pattern for event matching (same semantics as before).\n\nSpecial values: - `None`, empty string, or `\"*\"` matches all events - Any other string is compiled as a regex pattern",
+          "type": "string"
+        },
+        "once": {
+          "default": false,
+          "description": "When true, this hook only executes once per session (old flat format).",
+          "type": "boolean"
+        },
+        "status_message": {
+          "default": null,
+          "description": "Status message displayed while hook is executing (old flat format).",
+          "type": "string"
+        },
+        "timeout": {
+          "default": 600,
+          "description": "Timeout for the command (old flat format, applies when `command` is present).",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
         }
       },
       "type": "object"
@@ -1463,10 +1601,19 @@
       ],
       "default": {
         "after_agent": [],
+        "disable_all_hooks": false,
         "notification": [],
+        "permission_request": [],
         "post_tool_use": [],
+        "post_tool_use_failure": [],
+        "pre_compact": [],
         "pre_tool_use": [],
+        "session_end": [],
+        "session_start": [],
         "stop": [],
+        "subagent_start": [],
+        "subagent_stop": [],
+        "task_completed": [],
         "user_prompt_submit": []
       },
       "description": "Hook definitions grouped by event type. Each hook specifies a command to execute and optionally a matcher pattern for tool-use events."
