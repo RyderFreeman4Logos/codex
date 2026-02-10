@@ -27,8 +27,10 @@ pub(crate) struct Hooks {
     session_start: Vec<Hook>,
     session_end: Vec<Hook>,
     post_tool_use_failure: Vec<Hook>,
-    /// Semaphore to limit concurrent hook executions.
-    semaphore: Arc<Semaphore>,
+    /// Semaphore to limit concurrent sync hook executions.
+    sync_semaphore: Arc<Semaphore>,
+    /// Semaphore to limit concurrent async hook executions.
+    async_semaphore: Arc<Semaphore>,
     /// Tracks which once-hooks have already fired (event_name + hook_index).
     once_fired: Arc<Mutex<HashSet<String>>>,
 }
@@ -42,7 +44,8 @@ impl Default for Hooks {
             session_start: Vec::new(),
             session_end: Vec::new(),
             post_tool_use_failure: Vec::new(),
-            semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_HOOKS)),
+            sync_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_HOOKS)),
+            async_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_HOOKS)),
             once_fired: Arc::new(Mutex::new(HashSet::new())),
         }
     }
@@ -132,7 +135,8 @@ impl Hooks {
             session_start,
             session_end,
             post_tool_use_failure,
-            semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_HOOKS)),
+            sync_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_HOOKS)),
+            async_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_HOOKS)),
             once_fired: Arc::new(Mutex::new(HashSet::new())),
         }
     }
@@ -234,7 +238,7 @@ impl Hooks {
             for (_idx, hook) in async_hooks_with_idx {
                 let hook = hook.clone();
                 let mut payload = hook_payload.clone();
-                let sem = self.semaphore.clone();
+                let sem = self.async_semaphore.clone();
 
                 // Create a per-hook env file for this async hook
                 let env_file_guard = match tempfile::NamedTempFile::new() {
@@ -273,7 +277,7 @@ impl Hooks {
             for (_idx, hook) in async_hooks_with_idx {
                 let hook = hook.clone();
                 let payload = hook_payload.clone();
-                let sem = self.semaphore.clone();
+                let sem = self.async_semaphore.clone();
                 tokio::spawn(async move {
                     let Ok(_permit) = sem.acquire_owned().await else {
                         tracing::warn!(
@@ -297,7 +301,7 @@ impl Hooks {
             return HookAggregateEffect::default();
         }
 
-        let semaphore = &self.semaphore;
+        let semaphore = &self.sync_semaphore;
         let payload_ref = &hook_payload;
 
         // For SessionStart, each hook gets its own env file to avoid
