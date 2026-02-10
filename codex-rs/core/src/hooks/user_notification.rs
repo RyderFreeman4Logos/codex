@@ -50,12 +50,16 @@ pub(super) fn legacy_notify_json(
 pub(super) fn notify_hook(argv: Vec<String>) -> Hook {
     let argv = Arc::new(argv);
     Hook {
+        is_async: false,
+        once: false,
+        status_message: None,
+        matcher: None,
         func: Arc::new(move |payload: &HookPayload| {
             let argv = Arc::clone(&argv);
             Box::pin(async move {
                 let mut command = match command_from_argv(&argv) {
                     Some(command) => command,
-                    None => return HookOutcome::Proceed,
+                    None => return HookOutcome::Proceed.into(),
                 };
                 if let Ok(notify_payload) = legacy_notify_json(&payload.hook_event, &payload.cwd) {
                     command.arg(notify_payload);
@@ -68,7 +72,7 @@ pub(super) fn notify_hook(argv: Vec<String>) -> Hook {
                     .stderr(Stdio::null());
 
                 let _ = command.spawn();
-                HookOutcome::Proceed
+                HookOutcome::Proceed.into()
             })
         }),
     }
@@ -141,7 +145,7 @@ mod tests {
         let hook_event = HookEvent::PreToolUse {
             event: HookEventPreToolUse {
                 tool_name: "bash".to_string(),
-                tool_input: r#"{"command": "ls"}"#.to_string(),
+                tool_input: serde_json::json!({"command": "ls"}),
             },
         };
 
@@ -150,9 +154,9 @@ mod tests {
 
         // PreToolUse events use new protocol, not legacy format
         let expected = json!({
-            "event_type": "pre_tool_use",
+            "event_type": "PreToolUse",
             "tool_name": "bash",
-            "tool_input": r#"{"command": "ls"}"#,
+            "tool_input": {"command": "ls"},
         });
 
         assert_eq!(actual, expected);
@@ -162,10 +166,12 @@ mod tests {
     #[test]
     fn legacy_notify_json_for_post_tool_use_returns_event_serialized_directly() -> Result<()> {
         use super::super::types::HookEventPostToolUse;
+        use serde_json::json;
 
         let hook_event = HookEvent::PostToolUse {
             event: HookEventPostToolUse {
                 tool_name: "bash".to_string(),
+                tool_input: json!({"command": "ls"}),
                 tool_output: "file1.txt\nfile2.txt".to_string(),
             },
         };
@@ -174,31 +180,10 @@ mod tests {
         let actual: Value = serde_json::from_str(&serialized)?;
 
         let expected = json!({
-            "event_type": "post_tool_use",
+            "event_type": "PostToolUse",
             "tool_name": "bash",
-            "tool_output": "file1.txt\nfile2.txt",
-        });
-
-        assert_eq!(actual, expected);
-        Ok(())
-    }
-
-    #[test]
-    fn legacy_notify_json_for_stop_returns_event_serialized_directly() -> Result<()> {
-        use super::super::types::HookEventStop;
-
-        let hook_event = HookEvent::Stop {
-            event: HookEventStop {
-                reason: "max_tokens".to_string(),
-            },
-        };
-
-        let serialized = legacy_notify_json(&hook_event, Path::new("/tmp"))?;
-        let actual: Value = serde_json::from_str(&serialized)?;
-
-        let expected = json!({
-            "event_type": "stop",
-            "reason": "max_tokens",
+            "tool_input": {"command": "ls"},
+            "tool_response": "file1.txt\nfile2.txt",
         });
 
         assert_eq!(actual, expected);

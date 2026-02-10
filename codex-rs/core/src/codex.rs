@@ -26,6 +26,8 @@ use crate::features::Features;
 use crate::features::maybe_push_unstable_features_warning;
 use crate::hooks::HookEvent;
 use crate::hooks::HookEventAfterAgent;
+use crate::hooks::HookEventSessionStart;
+use crate::hooks::HookPayload;
 use crate::hooks::Hooks;
 use crate::models_manager::manager::ModelsManager;
 use crate::parse_command::parse_command;
@@ -1187,6 +1189,39 @@ impl Session {
         // record_initial_history can emit events. We record only after the SessionConfiguredEvent is emitted.
         sess.record_initial_history(initial_history).await;
 
+        // Dispatch SessionStart hook and apply any env vars it produces.
+        let session_start_effect = sess
+            .hooks()
+            .dispatch(HookPayload::new(
+                conversation_id,
+                session_configuration.cwd.clone(),
+                HookEvent::SessionStart {
+                    event: HookEventSessionStart {
+                        source: match &session_configuration.session_source {
+                            codex_protocol::protocol::SessionSource::Cli => "cli",
+                            codex_protocol::protocol::SessionSource::VSCode => "vscode",
+                            codex_protocol::protocol::SessionSource::Exec => "exec",
+                            codex_protocol::protocol::SessionSource::Mcp => "mcp",
+                            codex_protocol::protocol::SessionSource::SubAgent(_) => "subagent",
+                            codex_protocol::protocol::SessionSource::Unknown => "unknown",
+                        }.to_string(),
+                        model: session_configuration.collaboration_mode.model().to_string(),
+                        agent_type: "codex".to_string(),
+                    },
+                },
+                None,
+                session_configuration.approval_policy.to_string(),
+            ))
+            .await;
+
+        if !session_start_effect.env_vars.is_empty() {
+            tracing::info!(
+                count = session_start_effect.env_vars.len(),
+                "Applying env vars from SessionStart hooks"
+            );
+            sess.set_dependency_env(session_start_effect.env_vars).await;
+        }
+
         Ok(sess)
     }
 
@@ -1830,6 +1865,10 @@ impl Session {
         reason: Option<String>,
         proposed_execpolicy_amendment: Option<ExecPolicyAmendment>,
     ) -> ReviewDecision {
+        // TODO(hooks): dispatch HookEvent::PermissionRequest before showing approval dialog.
+        // This is blockable - if hook returns Block, deny the permission automatically.
+        // Need to construct tool_input JSON from command/cwd/reason and check EffectAction::Block.
+
         let sub_id = turn_context.sub_id.clone();
         // Add the tx_approve callback to the map before sending the request.
         let (tx_approve, rx_approve) = oneshot::channel();
@@ -2355,6 +2394,11 @@ impl Session {
         input: &[UserInput],
         response_item: ResponseItem,
     ) {
+        // TODO(hooks): dispatch HookEvent::UserPromptSubmit when user input is submitted.
+        // This is blockable - if hook returns Block, reject the prompt.
+        // Need to extract text from `input` and check EffectAction::Block before proceeding.
+        // Integration requires refactoring to allow rejection at this point.
+
         // Persist the user message to history, but emit the turn item from `UserInput` so
         // UI-only `text_elements` are preserved. `ResponseItem::Message` does not carry
         // those spans, and `record_response_item_and_emit_turn_item` would drop them.
@@ -2371,6 +2415,10 @@ impl Session {
         turn_context: &TurnContext,
         message: impl Into<String>,
     ) {
+        // TODO(hooks): dispatch HookEvent::Notification when notifications are sent.
+        // This is non-blockable - dispatch and continue.
+        // Need to determine notification level (info/warning/error) from context.
+
         let event = EventMsg::BackgroundEvent(BackgroundEventEvent {
             message: message.into(),
         });
@@ -3440,6 +3488,30 @@ mod handlers {
     }
 
     pub async fn shutdown(sess: &Arc<Session>, sub_id: String) -> bool {
+        use crate::hooks::HookEvent;
+        use crate::hooks::HookEventSessionEnd;
+        use crate::hooks::HookPayload;
+
+        // Dispatch SessionEnd hook (non-blockable, informational only).
+        let state = sess.state.lock().await;
+        let cwd = state.session_configuration.cwd.clone();
+        let approval_policy = state.session_configuration.approval_policy.to_string();
+        drop(state);
+
+        sess.hooks()
+            .dispatch(HookPayload::new(
+                sess.conversation_id,
+                cwd,
+                HookEvent::SessionEnd {
+                    event: HookEventSessionEnd {
+                        reason: "user_exit".to_string(),
+                    },
+                },
+                None,
+                approval_policy,
+            ))
+            .await;
+
         sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
         sess.services
             .unified_exec_manager
@@ -3703,6 +3775,11 @@ pub(crate) async fn run_turn(
     input: Vec<UserInput>,
     cancellation_token: CancellationToken,
 ) -> Option<String> {
+    // TODO(hooks): dispatch HookEvent::Stop when agent loop decides to stop.
+    // This is blockable - if hook returns Block, agent should NOT stop (continue running).
+    // Need to add stop_hook_active guard to prevent infinite loops if hook itself triggers stop.
+    // Integration requires identifying all loop exit points and checking EffectAction::Block.
+
     if input.is_empty() {
         return None;
     }
@@ -3910,11 +3987,10 @@ pub(crate) async fn run_turn(
                 if !needs_follow_up {
                     last_agent_message = sampling_request_last_agent_message;
                     sess.hooks()
-                        .dispatch(crate::hooks::HookPayload {
-                            session_id: sess.conversation_id,
-                            cwd: turn_context.cwd.clone(),
-                            triggered_at: chrono::Utc::now(),
-                            hook_event: HookEvent::AfterAgent {
+                        .dispatch(crate::hooks::HookPayload::new(
+                            sess.conversation_id,
+                            turn_context.cwd.clone(),
+                            HookEvent::AfterAgent {
                                 event: HookEventAfterAgent {
                                     thread_id: sess.conversation_id,
                                     turn_id: turn_context.sub_id.clone(),
@@ -3922,7 +3998,9 @@ pub(crate) async fn run_turn(
                                     last_assistant_message: last_agent_message.clone(),
                                 },
                             },
-                        })
+                            None,
+                            turn_context.approval_policy.to_string(),
+                        ))
                         .await;
                     break;
                 }
