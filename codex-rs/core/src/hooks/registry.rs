@@ -227,11 +227,20 @@ impl Hooks {
             }
         }
 
-        // Spawn async hooks as fire-and-forget tasks.
+        // Spawn async hooks as fire-and-forget tasks, throttled by the
+        // same semaphore to prevent unbounded concurrent processes.
         for (_idx, hook) in async_hooks_with_idx {
             let hook = hook.clone();
             let payload = hook_payload.clone();
+            let sem = self.semaphore.clone();
             tokio::spawn(async move {
+                let Ok(_permit) = sem.acquire_owned().await else {
+                    tracing::warn!(
+                        event = %payload.hook_event_name,
+                        "Async hook semaphore closed, skipping"
+                    );
+                    return;
+                };
                 let result = hook.execute(&payload).await;
                 tracing::debug!(
                     event = %payload.hook_event_name,
