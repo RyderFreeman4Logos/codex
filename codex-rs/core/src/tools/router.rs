@@ -181,8 +181,18 @@ impl ToolRouter {
 
         // Extract structured tool input for hooks (preserves shell arg
         // boundaries and workdir overrides, unlike log_payload()).
-        let tool_input = payload.hook_input();
+        let mut tool_input = payload.hook_input();
         let hook_name = hook_tool_name(&tool_name);
+
+        // Normalize tool_input for "Bash" hooks: exec_command uses "cmd" but hooks expect "command"
+        if hook_name == "Bash"
+            && let Some(obj) = tool_input.as_object_mut()
+            && obj.contains_key("cmd")
+            && !obj.contains_key("command")
+            && let Some(cmd_value) = obj.remove("cmd")
+        {
+            obj.insert("command".to_string(), cmd_value);
+        }
 
         // --- PreToolUse hook ---
         let pre_outcome = session
@@ -770,5 +780,103 @@ mod tests {
 
         // Invalid JSON should fallback to string
         assert_eq!(input, serde_json::json!("invalid"));
+    }
+
+    #[test]
+    fn test_bash_hook_input_normalization() {
+        // Test that exec_command's "cmd" field is normalized to "command" for Bash hooks
+        let payload = ToolPayload::Function {
+            arguments: r#"{"cmd": "ls -la", "workdir": "/tmp"}"#.to_string(),
+        };
+
+        let mut tool_input = payload.hook_input();
+        let hook_name = hook_tool_name("exec_command");
+
+        // Before normalization, should have "cmd"
+        assert_eq!(hook_name, "Bash");
+        assert!(tool_input.get("cmd").is_some());
+        assert!(tool_input.get("command").is_none());
+
+        // Apply normalization logic (simulating the router behavior)
+        if hook_name == "Bash"
+            && let Some(obj) = tool_input.as_object_mut()
+            && obj.contains_key("cmd")
+            && !obj.contains_key("command")
+            && let Some(cmd_value) = obj.remove("cmd")
+        {
+            obj.insert("command".to_string(), cmd_value);
+        }
+
+        // After normalization, should have "command" not "cmd"
+        assert_eq!(
+            tool_input.get("command"),
+            Some(&serde_json::json!("ls -la"))
+        );
+        assert!(tool_input.get("cmd").is_none());
+        // Other fields should be preserved
+        assert_eq!(
+            tool_input.get("workdir"),
+            Some(&serde_json::json!("/tmp"))
+        );
+    }
+
+    #[test]
+    fn test_bash_hook_input_normalization_preserves_existing_command() {
+        // Test that if "command" already exists, we don't overwrite it
+        let payload = ToolPayload::Function {
+            arguments: r#"{"cmd": "ls", "command": "pwd"}"#.to_string(),
+        };
+
+        let mut tool_input = payload.hook_input();
+        let hook_name = hook_tool_name("exec_command");
+
+        // Apply normalization logic
+        if hook_name == "Bash"
+            && let Some(obj) = tool_input.as_object_mut()
+            && obj.contains_key("cmd")
+            && !obj.contains_key("command")
+            && let Some(cmd_value) = obj.remove("cmd")
+        {
+            obj.insert("command".to_string(), cmd_value);
+        }
+
+        // Should keep original "command", not replace it
+        assert_eq!(
+            tool_input.get("command"),
+            Some(&serde_json::json!("pwd"))
+        );
+        // "cmd" should still be present (not removed)
+        assert_eq!(
+            tool_input.get("cmd"),
+            Some(&serde_json::json!("ls"))
+        );
+    }
+
+    #[test]
+    fn test_bash_hook_input_normalization_non_bash_tools() {
+        // Test that non-Bash tools don't get normalized
+        let payload = ToolPayload::Function {
+            arguments: r#"{"cmd": "some-command"}"#.to_string(),
+        };
+
+        let mut tool_input = payload.hook_input();
+        let hook_name = hook_tool_name("read_file"); // Maps to "Read", not "Bash"
+
+        // Apply normalization logic
+        if hook_name == "Bash"
+            && let Some(obj) = tool_input.as_object_mut()
+            && obj.contains_key("cmd")
+            && !obj.contains_key("command")
+            && let Some(cmd_value) = obj.remove("cmd")
+        {
+            obj.insert("command".to_string(), cmd_value);
+        }
+
+        // Should NOT normalize for non-Bash tools
+        assert_eq!(
+            tool_input.get("cmd"),
+            Some(&serde_json::json!("some-command"))
+        );
+        assert!(tool_input.get("command").is_none());
     }
 }
