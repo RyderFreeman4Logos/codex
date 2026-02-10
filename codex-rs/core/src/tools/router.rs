@@ -39,6 +39,15 @@ fn hook_tool_name(internal_name: &str) -> String {
         "local_shell" | "shell" | "container.exec" | "shell_command" | "exec_command" => {
             "Bash".to_string()
         }
+        // File-reading tools map to "Read"
+        "read_file" | "view_image" => "Read".to_string(),
+        // File-writing / stdin-piping tools map to "Write"
+        "write_stdin" => "Write".to_string(),
+        // Patch-based editing maps to "Edit"
+        "apply_patch" => "Edit".to_string(),
+        // Search tools
+        "grep_files" => "Grep".to_string(),
+        "list_dir" => "ListDir".to_string(),
         // Other tools (MCP, custom, function tools) pass through unchanged
         other => other.to_string(),
     }
@@ -329,6 +338,7 @@ impl ToolRouter {
 
             if post_outcome.suppress_output {
                 tracing::info!("post_tool_use hook requested output suppression");
+                return Ok(Self::suppressed_response(response));
             }
         }
 
@@ -350,6 +360,40 @@ impl ToolRouter {
             },
             ResponseInputItem::CustomToolCallOutput { output, .. } => output.clone(),
             _ => String::new(),
+        }
+    }
+
+    /// Replace tool output with a suppression notice when a PostToolUse hook
+    /// requests output suppression.
+    fn suppressed_response(original: &ResponseInputItem) -> ResponseInputItem {
+        const MSG: &str = "[output suppressed by hook]";
+        match original {
+            ResponseInputItem::FunctionCallOutput { call_id, output } => {
+                ResponseInputItem::FunctionCallOutput {
+                    call_id: call_id.clone(),
+                    output: codex_protocol::models::FunctionCallOutputPayload {
+                        body: FunctionCallOutputBody::Text(MSG.to_string()),
+                        success: output.success,
+                    },
+                }
+            }
+            ResponseInputItem::McpToolCallOutput { call_id, .. } => {
+                ResponseInputItem::FunctionCallOutput {
+                    call_id: call_id.clone(),
+                    output: codex_protocol::models::FunctionCallOutputPayload {
+                        body: FunctionCallOutputBody::Text(MSG.to_string()),
+                        success: Some(true),
+                    },
+                }
+            }
+            ResponseInputItem::CustomToolCallOutput { call_id, .. } => {
+                ResponseInputItem::CustomToolCallOutput {
+                    call_id: call_id.clone(),
+                    output: MSG.to_string(),
+                }
+            }
+            // Non-tool response items pass through unchanged.
+            other => other.clone(),
         }
     }
 
@@ -391,15 +435,18 @@ mod tests {
     }
 
     #[test]
-    fn test_hook_tool_name_passthrough() {
-        // Non-shell tools should pass through unchanged
-        assert_eq!(hook_tool_name("read_file"), "read_file");
-        assert_eq!(hook_tool_name("write_stdin"), "write_stdin");
-        assert_eq!(hook_tool_name("apply_patch"), "apply_patch");
-        assert_eq!(hook_tool_name("grep_files"), "grep_files");
-        assert_eq!(hook_tool_name("list_dir"), "list_dir");
-        assert_eq!(hook_tool_name("view_image"), "view_image");
+    fn test_hook_tool_name_builtin_mappings() {
+        // Built-in file/search tools map to Claude Code PascalCase names
+        assert_eq!(hook_tool_name("read_file"), "Read");
+        assert_eq!(hook_tool_name("view_image"), "Read");
+        assert_eq!(hook_tool_name("write_stdin"), "Write");
+        assert_eq!(hook_tool_name("apply_patch"), "Edit");
+        assert_eq!(hook_tool_name("grep_files"), "Grep");
+        assert_eq!(hook_tool_name("list_dir"), "ListDir");
+    }
 
+    #[test]
+    fn test_hook_tool_name_passthrough() {
         // MCP tools should pass through with their full qualified names
         assert_eq!(hook_tool_name("mcp__server__tool"), "mcp__server__tool");
 
